@@ -35,7 +35,7 @@ class BrowserRuntimeConfig(BaseModel):
 
     data_source_path: Path
     locale: str = "en-US"
-    openvpn_config_name: str
+    openvpn_config_name: str = ""
     persistent_profile_path: Path = Path("/runtime/playwright_profile")
     require_vpn_route: bool = False
     timezone: str = "UTC"
@@ -54,6 +54,8 @@ class BrowserRuntimeConfig(BaseModel):
             Validated OpenVPN config file name.
         """
 
+        if not openvpn_config_name:
+            return ""
         return openvpn_config_name_validate(openvpn_config_name)
 
     @property

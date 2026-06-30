@@ -57,6 +57,23 @@ def test_browser_runtime_reports_ready_when_profile_dir_is_missing(tmp_path: Pat
     assert state.problem_list == []
 
 
+def test_browser_runtime_reports_ready_without_openvpn_metadata(tmp_path: Path) -> None:
+    """Treat missing OpenVPN metadata as a no-VPN browser runtime."""
+    data_source_path = tmp_path / "data-source"
+    data_source_path.mkdir()
+    runtime_profile_path = tmp_path / "runtime-profile"
+    config = BrowserRuntimeConfig(
+        data_source_path=data_source_path,
+        persistent_profile_path=runtime_profile_path,
+    )
+
+    state = BrowserRuntime(config).readiness_check()
+
+    assert state.is_ready is True
+    assert state.openvpn_config_name == ""
+    assert state.problem_list == []
+
+
 def test_browser_runtime_context_materializes_profile_and_settings(tmp_path: Path) -> None:
     """Return profile path and browser settings for caller-owned Playwright launch."""
     data_source_path = _runtime_data_source_create(tmp_path)

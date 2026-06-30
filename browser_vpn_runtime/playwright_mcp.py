@@ -69,11 +69,14 @@ def playwright_mcp_command_argv_get(config: PlaywrightMcpConfig) -> list[str]:
         PlaywrightMcpError: If the browser/VPN runtime is not ready.
     """
 
-    openvpn_config_state = openvpn_config_validate(config.data_source_path)
+    openvpn_config_name = ""
+    if (config.data_source_path / "openvpn" / "config.json").exists():
+        openvpn_config_state = openvpn_config_validate(config.data_source_path)
+        openvpn_config_name = openvpn_config_state.openvpn_config_name
     runtime_config = BrowserRuntimeConfig(
         data_source_path=config.data_source_path,
         locale=config.locale,
-        openvpn_config_name=openvpn_config_state.openvpn_config_name,
+        openvpn_config_name=openvpn_config_name,
         persistent_profile_path=config.persistent_profile_path,
         require_vpn_route=config.require_vpn_route,
         timezone=config.timezone,

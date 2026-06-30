@@ -17,17 +17,17 @@ The runtime expects one private DataSource directory mounted into the pod. The c
     ...
 ```
 
-`openvpn/config.json` must contain:
+`openvpn/config.json` is optional. When it exists, browser runtime validates it and treats OpenVPN as enabled. When it does not exist, browser runtime starts as a no-VPN browser runtime. When present, `openvpn/config.json` must contain:
 
 ```json
 {"login": "vpn-user", "openvpn_config_name": "client.ovpn", "password": "vpn-password"}
 ```
 
-`openvpn_config_name` is validated as one local file name: it must not contain `/`, must not contain `..`, must not be absolute, and must name an existing file under `openvpn/`. The OpenVPN sidecar writes `login` and `password` into pod-local `/runtime/openvpn-auth.txt` and launches OpenVPN with `--auth-user-pass`; the secret volume remains read-only.
+`openvpn_config_name` is validated as one local file name: it must not contain `/`, must not contain `..`, must not be absolute, and must name an existing file under `openvpn/`. The OpenVPN sidecar is used only by VPN-enabled deployments. It writes `login` and `password` into pod-local `/runtime/openvpn-auth.txt` and launches OpenVPN with `--auth-user-pass`; the secret volume remains read-only.
 
-`playwright_profile/**` is a directory tree, not a zip archive. The helper `playwright_profile_materialize(...)` copies that tree into a pod-local persistent profile directory before browser launch. The helper `playwright_profile_snapshot(...)` copies the runtime tree back to `playwright_profile/**` when the caller chooses to persist browser state.
+`playwright_profile/**` is an optional directory tree, not a zip archive. When it exists, the helper `playwright_profile_materialize(...)` copies that tree into a pod-local persistent profile directory before browser launch. When it does not exist, the runtime starts from an empty browser profile. The helper `playwright_profile_snapshot(...)` copies the runtime tree back to `playwright_profile/**` when the caller chooses to persist browser state.
 
-`codex_profile/**` is reserved for callers that need a separate Codex or agent profile. This package documents the path but does not interpret its contents.
+`codex_profile/**` is optional and reserved for callers that need a separate Codex or agent profile. This package documents the path but does not interpret its contents.
 
 ## Kubernetes Boundary
 
@@ -76,7 +76,7 @@ browser-vpn-runtime-readiness \
   --require-vpn-route
 ```
 
-The command prints strict JSON readiness state. Without `--require-vpn-route`, it validates mounted OpenVPN metadata and the named `.ovpn` file. With `--require-vpn-route`, it exits with `0` only when `tun0` is also visible in the process network namespace.
+The command prints strict JSON readiness state. Without `openvpn/config.json`, readiness reports a no-VPN runtime. With `openvpn/config.json`, it validates mounted OpenVPN metadata and the named `.ovpn` file. With `--require-vpn-route`, it exits with `0` only when `tun0` is also visible in the process network namespace.
 
 Launch Playwright MCP through this runtime:
 

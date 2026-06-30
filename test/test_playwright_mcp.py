@@ -65,3 +65,22 @@ def test_playwright_mcp_command_uses_runtime_context(tmp_path: Path) -> None:
     ]
     assert (persistent_profile_path / "Preferences").read_text(encoding="utf-8") == "prefs"
     assert output_dir.is_dir()
+
+
+def test_playwright_mcp_command_allows_no_vpn_data_source(tmp_path: Path) -> None:
+    """Build Playwright MCP argv when the DataSource has no OpenVPN metadata."""
+    data_source_path = tmp_path / "data-source"
+    data_source_path.mkdir()
+    persistent_profile_path = tmp_path / "runtime-profile"
+    output_dir = tmp_path / "playwright-output"
+    config = PlaywrightMcpConfig(
+        data_source_path=data_source_path,
+        output_dir=output_dir,
+        persistent_profile_path=persistent_profile_path,
+    )
+
+    command_argv = playwright_mcp_command_argv_get(config)
+
+    assert "--user-data-dir" in command_argv
+    assert str(persistent_profile_path) in command_argv
+    assert output_dir.is_dir()

@@ -78,12 +78,14 @@ class BrowserRuntime:
         """
 
         problem_list: list[str] = []
-        try:
-            openvpn_config_state = openvpn_config_validate(self._config.data_source_path)
-            openvpn_config_name = openvpn_config_state.openvpn_config_name
-        except OpenVpnConfigError as exc:
-            openvpn_config_name = self._config.openvpn_config_name
-            problem_list.append(f"openvpn_config: {exc}")
+        openvpn_config_name = ""
+        if self._config.openvpn_metadata_path.exists():
+            try:
+                openvpn_config_state = openvpn_config_validate(self._config.data_source_path)
+                openvpn_config_name = openvpn_config_state.openvpn_config_name
+            except OpenVpnConfigError as exc:
+                openvpn_config_name = self._config.openvpn_config_name
+                problem_list.append(f"openvpn_config: {exc}")
         if self._config.require_vpn_route and not self._have_tun_route():
             problem_list.append("vpn_route: tun0 route is not visible in the current network namespace")
         return BrowserRuntimeState(

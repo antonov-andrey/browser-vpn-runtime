@@ -19,11 +19,11 @@ The private DataSource mount has four conventional responsibilities:
     ...
 ```
 
-`openvpn/config.json` selects the OpenVPN file through `openvpn_config_name` and stores `login` plus `password` for `--auth-user-pass`. The config name is one local `.ovpn` file name. It must not contain `/`, must not contain `..`, must not be an absolute path, and must resolve to an existing file inside `openvpn/`.
+`openvpn/config.json` is optional. When it exists, OpenVPN is enabled, the file selects the OpenVPN file through `openvpn_config_name`, and it stores `login` plus `password` for `--auth-user-pass`. The config name is one local `.ovpn` file name. It must not contain `/`, must not contain `..`, must not be an absolute path, and must resolve to an existing file inside `openvpn/`. When `openvpn/config.json` does not exist, browser runtime runs without VPN.
 
-`playwright_profile/**` is a directory tree copied into the pod-local runtime directory. Zip-based profile import/export is intentionally outside this contract because browser profile state is already a filesystem tree and Kubernetes volumes can mount it directly.
+`playwright_profile/**` is an optional directory tree copied into the pod-local runtime directory. When it does not exist, browser runtime starts with an empty profile. Zip-based profile import/export is intentionally outside this contract because browser profile state is already a filesystem tree and Kubernetes volumes can mount it directly.
 
-`codex_profile/**` is a reserved sibling tree for agent or Codex runtime state. This package does not inspect it, so callers can evolve that profile independently.
+`codex_profile/**` is an optional reserved sibling tree for agent or Codex runtime state. This package does not inspect it, so callers can evolve that profile independently.
 
 ## Kubernetes Boundary
 
@@ -40,11 +40,11 @@ This repository provides only a reference manifest. Production consumers should 
 
 OpenVPN config validation has two layers:
 
-- `BrowserRuntimeConfig` validates the user-facing `openvpn_config_name` syntax.
+- `BrowserRuntimeConfig` validates the user-facing `openvpn_config_name` syntax when it is not empty.
 - `openvpn_config_validate(...)` reads `openvpn/config.json`, validates the same syntax, and checks that the named file exists under `openvpn/`.
 - `openvpn_auth_file_write(...)` writes the runtime `--auth-user-pass` file into pod-local writable storage without mutating the private DataSource mount.
 
-The runtime never accepts fallback names, alternate paths, absolute paths, or path traversal. Missing or invalid config returns a not-ready runtime state or raises `OpenVpnConfigError` at the validation helper boundary.
+The runtime never accepts fallback names, alternate paths, absolute paths, or path traversal. Absent `openvpn/config.json` means no-VPN runtime. Invalid present config returns a not-ready runtime state or raises `OpenVpnConfigError` at the validation helper boundary.
 
 ## Playwright Boundary
 
@@ -70,4 +70,4 @@ Browser-bound extraction belongs to the caller's Playwright page/context code. D
 - readiness boolean,
 - explicit problem list.
 
-The CLI entrypoint `browser-vpn-runtime-readiness` exposes the same check for container startup probes or smoke tests. `--require-vpn-route` adds a network-namespace check for visible `tun0`; workflows that require an active VPN route should enable it, and local fixture checks may omit it when they only validate secret layout.
+The CLI entrypoint `browser-vpn-runtime-readiness` exposes the same check for container startup probes or smoke tests. `--require-vpn-route` adds a network-namespace check for visible `tun0`; workflows that require an active VPN route may enable it, and local fixture checks may omit it when they only validate secret layout.

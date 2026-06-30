@@ -12,7 +12,7 @@ from browser_vpn_runtime.openvpn_sidecar import openvpn_sidecar_command_argv_get
 
 def test_runtime_config_rejects_unsafe_openvpn_names(tmp_path: Path) -> None:
     """Reject OpenVPN config names that can escape the openvpn directory."""
-    unsafe_name_list = ["", "../client.ovpn", "/etc/openvpn/client.ovpn", "nested/client.ovpn", "..", "client..ovpn"]
+    unsafe_name_list = ["../client.ovpn", "/etc/openvpn/client.ovpn", "nested/client.ovpn", "..", "client..ovpn"]
 
     for unsafe_name in unsafe_name_list:
         with pytest.raises(ValidationError):
