@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: browser-vpn-runtime
+  labels:
+    app.kubernetes.io/name: browser-vpn-runtime
+spec:
+  restartPolicy: Never
+  volumes:
+    - name: runtime-data-source
+      secret:
+        secretName: browser-vpn-runtime-data-source
+    - name: runtime-work
+      emptyDir: {}
+  containers:
+    - name: openvpn
+      image: browser-vpn-runtime-openvpn:latest
+      securityContext:
+        capabilities:
+          add:
+            - NET_ADMIN
+        runAsUser: 0
+      volumeMounts:
+        - name: runtime-data-source
+          mountPath: /data-source
+          readOnly: true
+        - name: runtime-work
+          mountPath: /runtime
+    - name: browser-runtime
+      image: browser-vpn-runtime-playwright:latest
+      args:
+        - --data-source-path
+        - /data-source
+        - --openvpn-config-name
+        - client.ovpn
+        - --persistent-profile-path
+        - /runtime/playwright_profile
+        - --require-vpn-route
+      env:
+        - name: TZ
+          value: UTC
+      volumeMounts:
+        - name: runtime-data-source
+          mountPath: /data-source
+          readOnly: true
+        - name: runtime-work
+          mountPath: /runtime

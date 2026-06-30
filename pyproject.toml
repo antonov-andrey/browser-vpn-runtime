@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "browser-vpn-runtime"
+version = "0.1.0"
+description = "Reusable browser and OpenVPN runtime capability skeleton."
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.13,<3",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=9,<10",
+]
+
+[project.scripts]
+browser-vpn-runtime-playwright-mcp = "browser_vpn_runtime.playwright_mcp:main"
+browser-vpn-runtime-readiness = "browser_vpn_runtime.runtime:main"
+
+[tool.setuptools.packages.find]
+include = ["browser_vpn_runtime*"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
