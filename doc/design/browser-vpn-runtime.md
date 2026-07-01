@@ -6,7 +6,7 @@
 
 ## Secret Layout
 
-The private DataSource mount has four conventional responsibilities:
+The private DataSource mount has three conventional responsibilities and is mounted read-only at `/input/.secret` in container runtimes:
 
 ```text
 <data-source>/
@@ -19,22 +19,24 @@ The private DataSource mount has four conventional responsibilities:
     ...
 ```
 
-`openvpn/config.json` is optional. When it exists, OpenVPN is enabled, the file selects the OpenVPN file through `openvpn_config_name`, and it stores `login` plus `password` for `--auth-user-pass`. The config name is one local `.ovpn` file name. It must not contain `/`, must not contain `..`, must not be an absolute path, and must resolve to an existing file inside `openvpn/`. When `openvpn/config.json` does not exist, browser runtime runs without VPN.
+`openvpn/config.json` is optional for generic runtime consumers. When it exists, OpenVPN is enabled, the file selects the OpenVPN file through `openvpn_config_name`, and it stores `login` plus `password` for `--auth-user-pass`. The config name is one local `.ovpn` file name. It must not contain `/`, must not contain `..`, must not be an absolute path, and must resolve to an existing file inside `openvpn/`. When `openvpn/config.json` does not exist, browser runtime may run without VPN only if the caller has not declared OpenVPN mandatory. The Playwright MCP launcher flag `--require-openvpn` turns absent metadata into a startup error.
 
-`playwright_profile/**` is an optional directory tree copied into the pod-local runtime directory. When it does not exist, browser runtime starts with an empty profile. Zip-based profile import/export is intentionally outside this contract because browser profile state is already a filesystem tree and Kubernetes volumes can mount it directly.
+`playwright_profile/**` is an optional directory tree copied into the pod-local runtime directory. When it does not exist, browser runtime starts with an empty profile. Zip-based profile import/export is intentionally outside this contract because browser profile state is already a filesystem tree and Kubernetes volumes can mount it directly. Profile writeback snapshots the runtime profile into a temp directory next to the target, applies the target host owner to that temp tree, and then atomically replaces the target tree. Ownership and permissions must not be changed after the replace.
 
 `codex_profile/**` is an optional reserved sibling tree for agent or Codex runtime state. This package does not inspect it, so callers can evolve that profile independently.
 
 ## Kubernetes Boundary
 
-The reference Kubernetes shape is one pod with two cooperating containers:
+The reference Kubernetes shape has two separate runtime units:
 
-- `openvpn`: sidecar container that owns VPN process startup and tunnel lifecycle.
-- `browser-runtime`: application or workflow container that owns Playwright launch and extraction behavior.
+- `workflow-runtime`: the workflow executor container or pod that runs DBOS, Codex, package installation, ordinary network calls, and non-browser work through the normal cluster network.
+- `browser-runtime`: a dedicated pod or service for browser traffic; it contains an `openvpn` container and one `playwright-mcp` container that share that pod network namespace.
 
-Both containers share the pod network namespace. The browser container therefore uses the sidecar network path without implementing VPN mechanics itself. The DataSource secret volume is mounted read-only, and `/runtime` is writable pod-local state. The `openvpn` sidecar creates `/runtime/openvpn-auth.txt` from `openvpn/config.json`, sets mode `0600`, and passes it to OpenVPN with `--auth-user-pass`.
+The workflow runtime must not run in the OpenVPN network namespace. OpenVPN route changes must affect only the browser runtime pod, because Codex itself, dependency installation, DBOS, and other non-browser network calls must use the normal network path. Codex receives only the HTTP MCP URL of the browser runtime service and uses that MCP server when a stage needs browser access.
 
-This repository provides only a reference manifest. Production consumers should set their own image names, resource limits, probes, and secret names.
+The `openvpn` container owns VPN process startup and tunnel lifecycle. The `playwright-mcp` container owns Playwright MCP startup, browser launch, browser profile materialization, stealth setup, locale, timezone, viewport, and browser artifact output. These two containers share a network namespace so only the browser process exits through the VPN tunnel. The DataSource secret volume is mounted read-only at `/input/.secret`, and `/runtime` is writable pod-local state. Workflow containers that need secret contents copy `/input/.secret` to `/runtime/.secret` at startup and use only that runtime copy. The `openvpn` sidecar creates `/runtime/openvpn-auth.txt` from `openvpn/config.json`, sets mode `0600`, and passes it to OpenVPN with `--auth-user-pass`.
+
+This repository provides only reference runtime images and contracts. Production consumers should set their own pod shape, service names, resource limits, probes, and secret names while preserving the network-boundary rule above.
 
 ## OpenVPN Boundary
 
@@ -50,15 +52,17 @@ The runtime never accepts fallback names, alternate paths, absolute paths, or pa
 
 Playwright profile helpers operate on directory trees:
 
-- `playwright_profile_materialize(data_source_path, target_profile_path)` copies `<data-source>/playwright_profile/**` to the pod-local profile path.
-- `playwright_profile_snapshot(runtime_profile_path, data_source_path)` copies a runtime profile tree back to `<data-source>/playwright_profile/**`.
+- `playwright_profile_materialize(data_source_path, target_profile_path)` copies `<data-source>/playwright_profile/**` to the pod-local profile path only when the target path does not already exist.
+- `playwright_profile_snapshot(runtime_profile_path, data_source_path)` copies a runtime profile tree into a sibling temp tree, applies requested ownership to that temp tree, and atomically replaces `<data-source>/playwright_profile/**`.
 - `BrowserRuntime.playwright_runtime_context_get()` materializes the profile and returns the profile path, locale, timezone, and viewport settings for caller-owned Playwright launch code.
 
 The helpers do not know what sites or workflows use the profile. They also do not read domain-specific files inside the tree.
 
 Browser-bound extraction belongs to the caller's Playwright page/context code. Direct HTTP clients are not the primary extraction route for this capability because they bypass browser profile state, browser JavaScript behavior, and the OpenVPN browser-runtime boundary.
 
-`browser-vpn-runtime-playwright-mcp` owns Playwright MCP startup for workflow containers that expose browser tools to Codex. Consumers pass only the mounted DataSource path and pod-local runtime paths. The consumer repository must not configure Codex to execute `@playwright/mcp` directly because package selection, profile materialization, readiness checks, viewport, output directory, and VPN route checks belong to this runtime capability.
+`browser-vpn-runtime-playwright-mcp` owns Playwright MCP startup for workflow projects that expose browser tools to Codex. Consumers start one launcher process per workflow run inside the browser runtime pod and configure Codex in the workflow runtime with that process HTTP MCP URL. Consumers pass only the mounted DataSource path, pod-local runtime paths, bind host, allowed MCP host names, port, and the mandatory OpenVPN flag. When the workflow runtime connects through a Kubernetes Service or Docker Compose service name, that host name must be present in `--allowed-hosts`; otherwise `@playwright/mcp` rejects the connection before Codex can use the browser. The consumer repository must not configure Codex to execute `@playwright/mcp`, `npx`, or another Playwright MCP launcher directly because package selection, profile materialization, readiness checks, stealth initialization, locale, timezone, viewport, output directory, and VPN route checks belong to this runtime capability.
+
+The launcher uses one browser stack: headed Chromium through `xvfb-run`, persistent `userDataDir`, `sharedBrowserContext`, `playwright_stealth` init script, Turkish locale, Istanbul timezone, 1920x1080 viewport by default, and file-backed MCP artifacts. Headless fallback, per-stage profile directories, direct `npx` execution, and caller-owned browser flags are outside this runtime contract.
 
 ## Readiness Contract
 

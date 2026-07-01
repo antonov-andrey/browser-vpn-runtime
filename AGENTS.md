@@ -4,6 +4,8 @@
 - This repository owns a reusable browser/VPN runtime capability only.
 - Do not add marketplace, brand, size-chart, scraping-domain, or workflow-specific business logic.
 - Keep the runtime boundary explicit: OpenVPN owns VPN connectivity, Playwright owns browser execution, and callers own domain extraction behavior.
+- The Playwright MCP runtime must expose one runtime-owned browser stack; consumers must not configure direct `@playwright/mcp`, direct `npx`, stage-local browser profiles, or caller-owned browser flags as replacements for this stack.
+- Consumers must keep workflow executors outside the OpenVPN network namespace; only browser runtime processes may use the VPN network path.
 
 ## Python
 - Every Python module, class, and function must have a docstring.
