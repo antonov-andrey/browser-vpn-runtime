@@ -118,7 +118,7 @@ def _args_parse() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description="Check browser/VPN runtime readiness.")
     parser.add_argument("--data-source-path", type=Path, required=True)
-    parser.add_argument("--openvpn-config-name", required=True)
+    parser.add_argument("--openvpn-config-name", default="")
     parser.add_argument("--persistent-profile-path", type=Path, default=Path("/runtime/playwright_profile"))
     parser.add_argument("--require-vpn-route", action="store_true")
     parser.add_argument("--locale", default="en-US")

@@ -6,9 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "browser-vpn-runtime"
 version = "0.1.0"
 description = "Reusable browser and OpenVPN runtime capability skeleton."
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = [
     "pydantic>=2.13,<3",
+    "playwright-stealth>=2.0.0,<3",
 ]
 
 [project.optional-dependencies]

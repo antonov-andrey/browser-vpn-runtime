@@ -5,6 +5,9 @@ from pathlib import Path
 
 from browser_vpn_runtime.openvpn import openvpn_auth_file_write
 
+DEFAULT_DATA_SOURCE_PATH = Path("/input/.secret")
+DEFAULT_RUNTIME_PATH = Path("/runtime")
+
 
 def openvpn_sidecar_command_argv_get(data_source_path: Path, runtime_path: Path) -> list[str]:
     """Build OpenVPN sidecar argv from strict DataSource validation.
@@ -30,7 +33,7 @@ def openvpn_sidecar_command_argv_get(data_source_path: Path, runtime_path: Path)
 def main() -> None:
     """Replace the current process with OpenVPN after strict startup validation."""
 
-    command_argv = openvpn_sidecar_command_argv_get(Path("/data-source"), Path("/runtime"))
+    command_argv = openvpn_sidecar_command_argv_get(DEFAULT_DATA_SOURCE_PATH, DEFAULT_RUNTIME_PATH)
     os.execvp(command_argv[0], command_argv)
 
 

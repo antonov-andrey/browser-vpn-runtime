@@ -34,13 +34,13 @@ class BrowserRuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True, validate_default=True)
 
     data_source_path: Path
-    locale: str = "en-US"
+    locale: str = "tr-TR"
     openvpn_config_name: str = ""
     persistent_profile_path: Path = Path("/runtime/playwright_profile")
     require_vpn_route: bool = False
-    timezone: str = "UTC"
-    viewport_height: int = Field(default=720, ge=1)
-    viewport_width: int = Field(default=1280, ge=1)
+    timezone: str = "Europe/Istanbul"
+    viewport_height: int = Field(default=1080, ge=1)
+    viewport_width: int = Field(default=1920, ge=1)
 
     @field_validator("openvpn_config_name")
     @classmethod
