@@ -6,9 +6,10 @@ import os
 import shutil
 import time
 from pathlib import Path
+from typing import Self
 
 from playwright_stealth import Stealth
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from browser_vpn_runtime.config import BrowserRuntimeConfig
 from browser_vpn_runtime.openvpn import openvpn_config_validate
@@ -21,7 +22,7 @@ DEFAULT_BROWSER_CHANNEL = "chrome"
 DEFAULT_MCP_CONFIG_PATH = Path("/runtime/playwright_mcp/config.json")
 DEFAULT_MCP_EXECUTABLE_NAME = "playwright-mcp"
 DEFAULT_MCP_HOST = "127.0.0.1"
-DEFAULT_OUTPUT_DIR = Path("/runtime/playwright_mcp")
+DEFAULT_OUTPUT_DIR = Path("/runtime/.playwright-mcp/current")
 DEFAULT_PORT = 8931
 DEFAULT_VPN_READY_TIMEOUT_SECONDS = 60
 XVFB_RUN_EXECUTABLE_NAME = "xvfb-run"
@@ -53,6 +54,21 @@ class PlaywrightMcpConfig(BaseModel):
     viewport_height: int = Field(default=1080, ge=1)
     viewport_width: int = Field(default=1920, ge=1)
     vpn_ready_timeout_seconds: int = Field(default=DEFAULT_VPN_READY_TIMEOUT_SECONDS, ge=0)
+
+    @model_validator(mode="after")
+    def _playwright_mcp_output_dir_validate(self) -> Self:
+        """Require a dedicated Playwright MCP artifact namespace.
+
+        Returns:
+            Validated configuration.
+
+        Raises:
+            ValueError: If output_dir is not scoped under `.playwright-mcp`.
+        """
+
+        if ".playwright-mcp" not in self.output_dir.parts:
+            raise ValueError("output_dir must be scoped under a .playwright-mcp directory")
+        return self
 
 
 def _args_parse() -> argparse.Namespace:

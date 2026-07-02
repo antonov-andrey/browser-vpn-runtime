@@ -50,6 +50,8 @@ The package does not import Playwright directly in its readiness path. Browser r
 
 `browser-vpn-runtime-playwright-mcp` is the runtime-owned entrypoint for Playwright MCP. Workflow projects start this entrypoint once for one workflow run inside the browser runtime pod or service and connect Codex in the workflow runtime to its HTTP MCP URL. Workflow projects must not invoke `@playwright/mcp`, `npx`, or another Playwright MCP launcher directly. The launcher validates the mounted `secret`, materializes `playwright_profile/**`, writes a runtime-owned Playwright MCP config, writes a `playwright_stealth` init script, forces headed Chromium through `xvfb-run`, configures Turkish locale and Istanbul timezone, and replaces itself with the Playwright MCP server process.
 
+`--output-dir` must point at a caller-owned writable `.playwright-mcp` artifact namespace, for example `/output/.playwright-mcp/current`. Passing a workflow output root such as `/output` is forbidden because Playwright MCP writes automatic page and console artifacts directly under `outputDir`. This path is intentionally separate from runtime-scoped paths: `--mcp-config-path` should stay under pod-local runtime storage for the generated MCP config, and `--persistent-profile-path` should stay under pod-local runtime storage for the mutable browser profile. This separation lets browser tools write evidence under the caller's shared output root while keeping generated runtime files out of root workflow artifact directories.
+
 ## Development
 
 Install dependencies:
@@ -82,7 +84,7 @@ Launch Playwright MCP through this runtime:
 browser-vpn-runtime-playwright-mcp \
   --data-source-path /input/.secret \
   --persistent-profile-path /runtime/playwright_profile \
-  --output-dir /runtime/playwright_mcp \
+  --output-dir /output/.playwright-mcp/current \
   --mcp-config-path /runtime/playwright_mcp/config.json \
   --host 0.0.0.0 \
   --allowed-hosts localhost,127.0.0.1,browser-runtime \

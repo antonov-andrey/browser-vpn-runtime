@@ -37,7 +37,7 @@ def test_playwright_mcp_command_uses_runtime_context(monkeypatch: pytest.MonkeyP
     """Build Playwright MCP argv through the browser/VPN runtime boundary."""
     data_source_path = _runtime_data_source_create(tmp_path)
     persistent_profile_path = tmp_path / "runtime-profile"
-    output_dir = tmp_path / "playwright-output"
+    output_dir = tmp_path / ".playwright-mcp" / "current"
     mcp_config_path = tmp_path / "mcp" / "config.json"
     monkeypatch.setattr(BrowserRuntime, "_have_tun_route", lambda self: True)
     config = PlaywrightMcpConfig(
@@ -79,6 +79,40 @@ def test_playwright_mcp_command_uses_runtime_context(monkeypatch: pytest.MonkeyP
     assert output_dir.is_dir()
 
 
+def test_playwright_mcp_config_keeps_output_root_separate_from_runtime_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Write MCP file output under caller-owned root while runtime files stay scoped."""
+    data_source_path = _runtime_data_source_create(tmp_path)
+    output_dir = tmp_path / "output" / ".playwright-mcp" / "current"
+    runtime_path = tmp_path / "runtime" / "browser_vpn_runtime"
+    mcp_config_path = runtime_path / "playwright_mcp" / "config.json"
+    persistent_profile_path = runtime_path / "playwright_profile"
+    stealth_script_path = mcp_config_path.with_suffix(".stealth.js")
+    monkeypatch.setattr(BrowserRuntime, "_have_tun_route", lambda self: True)
+    config = PlaywrightMcpConfig(
+        data_source_path=data_source_path,
+        mcp_config_path=mcp_config_path,
+        output_dir=output_dir,
+        persistent_profile_path=persistent_profile_path,
+    )
+
+    playwright_mcp_command_argv_get(config)
+
+    config_payload = json.loads(mcp_config_path.read_text(encoding="utf-8"))
+    assert config_payload["outputDir"] == str(output_dir)
+    assert config_payload["browser"]["userDataDir"] == str(persistent_profile_path)
+    assert config_payload["browser"]["initScript"] == [str(stealth_script_path)]
+    assert mcp_config_path.is_file()
+    assert stealth_script_path.is_file()
+    assert mcp_config_path.parent == runtime_path / "playwright_mcp"
+    assert stealth_script_path.parent == runtime_path / "playwright_mcp"
+    assert output_dir not in mcp_config_path.parents
+    assert output_dir not in persistent_profile_path.parents
+    assert output_dir not in stealth_script_path.parents
+
+
 def test_playwright_mcp_command_declares_allowed_hosts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Allow workflow containers to reach the MCP server through a runtime-owned service host."""
     data_source_path = _runtime_data_source_create(tmp_path)
@@ -88,7 +122,7 @@ def test_playwright_mcp_command_declares_allowed_hosts(monkeypatch: pytest.Monke
         data_source_path=data_source_path,
         host="0.0.0.0",
         mcp_config_path=tmp_path / "mcp" / "config.json",
-        output_dir=tmp_path / "playwright-output",
+        output_dir=tmp_path / ".playwright-mcp" / "current",
         persistent_profile_path=tmp_path / "runtime-profile",
     )
 
@@ -126,7 +160,7 @@ def test_playwright_mcp_command_allows_no_vpn_data_source(tmp_path: Path) -> Non
     data_source_path = tmp_path / "data-source"
     data_source_path.mkdir()
     persistent_profile_path = tmp_path / "runtime-profile"
-    output_dir = tmp_path / "playwright-output"
+    output_dir = tmp_path / ".playwright-mcp" / "current"
     config = PlaywrightMcpConfig(
         data_source_path=data_source_path,
         mcp_config_path=tmp_path / "mcp" / "config.json",
@@ -138,3 +172,12 @@ def test_playwright_mcp_command_allows_no_vpn_data_source(tmp_path: Path) -> Non
 
     assert command_argv[:3] == ["xvfb-run", "-a", "playwright-mcp"]
     assert output_dir.is_dir()
+
+
+def test_playwright_mcp_rejects_output_dir_outside_artifact_namespace(tmp_path: Path) -> None:
+    """Reject Playwright MCP output roots that would write files beside workflow artifacts."""
+    data_source_path = tmp_path / "data-source"
+    data_source_path.mkdir()
+
+    with pytest.raises(ValueError, match="output_dir must be scoped under a .playwright-mcp directory"):
+        PlaywrightMcpConfig(data_source_path=data_source_path, output_dir=tmp_path / "output")
