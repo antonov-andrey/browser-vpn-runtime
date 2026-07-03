@@ -1,6 +1,6 @@
 # Реализация `browser-vpn-runtime`
 
-**Цель:** создать отдельный reusable runtime repo для browser/VPN capability, который может подключаться к workflow container-ам через `marketplace-automation` и не содержит domain logic брендовых таблиц размеров.
+**Цель:** создать отдельный reusable runtime repo для browser/VPN capability, который может подключаться к workflow container-ам и не содержит domain logic конкретного workflow.
 
 ## Файловая Структура
 

@@ -1,6 +1,6 @@
 # browser-vpn-runtime
 
-Reusable runtime capability for browser automation through an OpenVPN tunnel. This repository intentionally contains no marketplace-specific extraction logic; application workflows bring their own Playwright page/context behavior and use this package only for runtime configuration, profile directory handling, and readiness checks.
+Reusable runtime capability for browser automation through an OpenVPN tunnel. This repository intentionally contains no domain extraction logic; application workflows bring their own Playwright page/context behavior and use this package only for runtime configuration, profile directory handling, and readiness checks.
 
 ## Secret Layout
 

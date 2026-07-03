@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`browser-vpn-runtime` is a reusable runtime capability for workflows that need browser automation over an OpenVPN connection. It owns runtime contracts, secret layout validation, and Playwright profile directory movement. It does not own domain extraction, marketplace schemas, brand logic, or workflow orchestration policy.
+`browser-vpn-runtime` is a reusable runtime capability for workflows that need browser automation over an OpenVPN connection. It owns runtime contracts, secret layout validation, and Playwright profile directory movement. It does not own domain extraction, domain schemas, domain logic, or workflow orchestration policy.
 
 ## Secret Layout
 
