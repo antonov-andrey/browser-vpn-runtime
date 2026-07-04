@@ -2,13 +2,16 @@
 
 ## Scope
 - This repository owns a reusable browser/VPN runtime capability only.
+- Shared workflow-container ecosystem authoring and code quality rules live in the `workflow-container-developer` plugin reference `references/workflow-container-authoring.md`.
 - Do not add domain-specific or workflow-specific business logic.
 - Keep the runtime boundary explicit: OpenVPN owns VPN connectivity, Playwright owns browser execution, and callers own domain extraction behavior.
 - The Playwright MCP runtime must expose one runtime-owned browser stack; consumers must not configure direct `@playwright/mcp`, direct `npx`, stage-local browser profiles, or caller-owned browser flags as replacements for this stack.
 - Consumers must keep workflow executors outside the OpenVPN network namespace; only browser runtime processes may use the VPN network path.
 
 ## Python
-- Every Python module, class, and function must have a docstring.
+- Python code uses Python 3.14.
+- Python code must be formatted with Black using target version `py314` and line length `120`.
+- Public API, stable runtime boundaries, and non-trivial modules must have docstrings that describe real behavior.
 - Runtime configuration and runtime state objects must use strict Pydantic models.
 - Tests must use `pytest`.
 

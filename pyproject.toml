@@ -26,3 +26,7 @@ include = ["browser_vpn_runtime*"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
+
+[tool.black]
+target-version = ["py314"]
+line-length = 120

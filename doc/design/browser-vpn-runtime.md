@@ -4,6 +4,8 @@
 
 `browser-vpn-runtime` is a reusable runtime capability for workflows that need browser automation over an OpenVPN connection. It owns runtime contracts, secret layout validation, and Playwright profile directory movement. It does not own domain extraction, domain schemas, domain logic, or workflow orchestration policy.
 
+Shared workflow-container ecosystem authoring and code quality rules live in the `workflow-container-developer` plugin reference `references/workflow-container-authoring.md`; this document owns only browser/VPN runtime-specific boundaries.
+
 ## Secret Layout
 
 The private DataSource mount has three conventional responsibilities and is mounted read-only at `/input/.secret` in container runtimes:
