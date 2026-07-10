@@ -5,6 +5,8 @@ import shutil
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
+CHROMIUM_SINGLETON_NAME_LIST = ["SingletonCookie", "SingletonLock", "SingletonSocket"]
+
 
 
 class PlaywrightProfileState(BaseModel):
@@ -87,6 +89,8 @@ def playwright_profile_materialize(data_source_path: Path, target_profile_path: 
     """
 
     if target_profile_path.exists():
+        for singleton_name in CHROMIUM_SINGLETON_NAME_LIST:
+            (target_profile_path / singleton_name).unlink(missing_ok=True)
         return PlaywrightProfileState(
             file_path_list=sorted(path for path in target_profile_path.rglob("*") if path.is_file()),
             profile_path=target_profile_path,
@@ -95,9 +99,13 @@ def playwright_profile_materialize(data_source_path: Path, target_profile_path: 
     if not source_profile_path.exists():
         target_profile_path.mkdir(parents=True)
         return PlaywrightProfileState(file_path_list=[], profile_path=target_profile_path)
+        for singleton_name in CHROMIUM_SINGLETON_NAME_LIST:
+            (target_profile_path / singleton_name).unlink(missing_ok=True)
     file_path_list = _directory_tree_copy(source_profile_path, target_profile_path)
     return PlaywrightProfileState(file_path_list=file_path_list, profile_path=target_profile_path)
 
+    for singleton_name in CHROMIUM_SINGLETON_NAME_LIST:
+        (target_profile_path / singleton_name).unlink(missing_ok=True)
 
 def playwright_profile_snapshot(
     runtime_profile_path: Path,
