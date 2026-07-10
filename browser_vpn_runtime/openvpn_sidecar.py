@@ -27,6 +27,7 @@ def openvpn_sidecar_command_argv_get(data_source_path: Path, runtime_path: Path)
         str(openvpn_config_state.openvpn_config_path),
         "--auth-user-pass",
         str(openvpn_config_state.auth_file_path),
+        "--persist-tun",
     ]
 
 

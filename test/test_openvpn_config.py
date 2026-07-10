@@ -90,6 +90,7 @@ def test_openvpn_sidecar_command_uses_validated_runtime_state(tmp_path: Path) ->
         str(openvpn_path / "client.ovpn"),
         "--auth-user-pass",
         str(runtime_path / "openvpn-auth.txt"),
+        "--persist-tun",
     ]
 
 
