@@ -33,7 +33,7 @@ def _directory_tree_copy(source_path: Path, target_path: Path) -> list[Path]:
         raise FileNotFoundError(f"profile directory is missing: {source_path}")
     if target_path.exists():
         shutil.rmtree(target_path)
-    shutil.copytree(source_path, target_path)
+    shutil.copytree(source_path, target_path, ignore=shutil.ignore_patterns(*CHROMIUM_SINGLETON_NAME_LIST))
     return sorted(path for path in target_path.rglob("*") if path.is_file())
 
 
@@ -88,24 +88,19 @@ def playwright_profile_materialize(data_source_path: Path, target_profile_path: 
         Materialized profile state.
     """
 
-    if target_profile_path.exists():
-        for singleton_name in CHROMIUM_SINGLETON_NAME_LIST:
-            (target_profile_path / singleton_name).unlink(missing_ok=True)
-        return PlaywrightProfileState(
-            file_path_list=sorted(path for path in target_profile_path.rglob("*") if path.is_file()),
-            profile_path=target_profile_path,
-        )
-    source_profile_path = data_source_path / "playwright_profile"
-    if not source_profile_path.exists():
-        target_profile_path.mkdir(parents=True)
-        return PlaywrightProfileState(file_path_list=[], profile_path=target_profile_path)
-        for singleton_name in CHROMIUM_SINGLETON_NAME_LIST:
-            (target_profile_path / singleton_name).unlink(missing_ok=True)
-    file_path_list = _directory_tree_copy(source_profile_path, target_profile_path)
-    return PlaywrightProfileState(file_path_list=file_path_list, profile_path=target_profile_path)
-
+    if not target_profile_path.exists():
+        source_profile_path = data_source_path / "playwright_profile"
+        if source_profile_path.exists():
+            _directory_tree_copy(source_profile_path, target_profile_path)
+        else:
+            target_profile_path.mkdir(parents=True)
     for singleton_name in CHROMIUM_SINGLETON_NAME_LIST:
         (target_profile_path / singleton_name).unlink(missing_ok=True)
+    return PlaywrightProfileState(
+        file_path_list=sorted(path for path in target_profile_path.rglob("*") if path.is_file()),
+        profile_path=target_profile_path,
+    )
+
 
 def playwright_profile_snapshot(
     runtime_profile_path: Path,

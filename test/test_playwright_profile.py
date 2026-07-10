@@ -73,6 +73,25 @@ def test_playwright_profile_materialize_removes_stale_chromium_singletons(tmp_pa
     )
 
 
+def test_playwright_profile_materialize_removes_singletons_copied_from_source(tmp_path: Path) -> None:
+    """Remove stale Chromium singleton markers after fresh profile materialization."""
+    source_profile_path = tmp_path / "data-source" / "playwright_profile"
+    source_profile_path.mkdir(parents=True)
+    (source_profile_path / "Preferences").write_text("source", encoding="utf-8")
+    for singleton_name in ["SingletonCookie", "SingletonLock", "SingletonSocket"]:
+        (source_profile_path / singleton_name).symlink_to("stale")
+    target_profile_path = tmp_path / "runtime-profile"
+
+    state = playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+
+    assert state.file_path_list == [target_profile_path / "Preferences"]
+    assert state.profile_path == target_profile_path
+    assert not any(
+        (target_profile_path / singleton_name).exists() or (target_profile_path / singleton_name).is_symlink()
+        for singleton_name in ["SingletonCookie", "SingletonLock", "SingletonSocket"]
+    )
+
+
 def test_playwright_profile_snapshot_copies_runtime_tree_back_to_data_source(tmp_path: Path) -> None:
     """Snapshot a runtime profile directory tree back under playwright_profile."""
     runtime_profile_path = tmp_path / "runtime-profile"
