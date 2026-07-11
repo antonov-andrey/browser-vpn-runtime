@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: browser-vpn-runtime-profile-writeback
+  labels:
+    app.kubernetes.io/name: browser-vpn-runtime-profile-writeback
+spec:
+  backoffLimit: 1
+  suspend: true
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: browser-vpn-runtime-profile-writeback
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 1000
+      volumes:
+        - name: profile-runtime
+          persistentVolumeClaim:
+            claimName: browser-vpn-runtime-profile-runtime
+            readOnly: true
+        - name: profile-writeback
+          persistentVolumeClaim:
+            claimName: browser-vpn-runtime-profile-writeback
+      containers:
+        - name: profile-writeback
+          image: browser-vpn-runtime-playwright:latest
+          args:
+            - browser-vpn-runtime-playwright-profile-snapshot
+            - --runtime-profile-path
+            - /runtime-profile/playwright_profile
+            - --writeback-root-path
+            - /writeback
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 1000
+          volumeMounts:
+            - name: profile-runtime
+              mountPath: /runtime-profile
+              readOnly: true
+            - name: profile-writeback
+              mountPath: /writeback

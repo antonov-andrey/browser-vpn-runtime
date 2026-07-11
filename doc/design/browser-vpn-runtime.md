@@ -2,13 +2,11 @@
 
 ## Purpose
 
-`browser-vpn-runtime` is a reusable runtime capability for workflows that need browser automation over an OpenVPN connection. It owns runtime contracts, secret layout validation, and Playwright profile directory movement. It does not own domain extraction, domain schemas, domain logic, or workflow orchestration policy.
+`browser-vpn-runtime` provides one reusable browser automation surface with a stable VPN egress boundary. Browser execution, profile state, and Playwright MCP belong to the browser runtime. OpenVPN connectivity, SOCKS5 target connections, tunnel lifecycle, and leak prevention belong to the VPN egress gateway. Workflow execution stays external and consumes only the browser MCP service.
 
-Shared workflow-container ecosystem authoring and code quality rules live in the `workflow-container-developer` plugin reference `references/workflow-container-authoring.md`; this document owns only browser/VPN runtime-specific boundaries.
+## DataSource Boundaries
 
-## DataSource Layout
-
-The private DataSource filesystem has three conventional responsibilities and is mounted read-only at `/input/.secret` in container runtimes:
+The DataSource layout is:
 
 ```text
 <data-source>/
@@ -21,72 +19,43 @@ The private DataSource filesystem has three conventional responsibilities and is
     ...
 ```
 
-`openvpn/config.json` is optional for generic runtime consumers. When it exists, OpenVPN is enabled, the file selects the OpenVPN file through `openvpn_config_name`, and it stores `login` plus `password` for `--auth-user-pass`. The config name is one local `.ovpn` file name. It must not contain `/`, must not contain `..`, must not be an absolute path, and must resolve to an existing file inside `openvpn/`. When `openvpn/config.json` does not exist, browser runtime may run without VPN only if the caller has not declared OpenVPN mandatory. The Playwright MCP launcher flag `--require-openvpn` turns absent metadata into a startup error.
+The gateway is the only component allowed to mount the whole DataSource because `openvpn/config.json` contains credentials. It validates the config name as one local `.ovpn` file inside `openvpn/`, validates the file exists, and writes `login` and `password` to a runtime-owned `0600` authentication file. It does not mutate the source configuration. The browser mounts only the `playwright_profile/` subdirectory and treats an absent profile as a first-run empty profile.
 
-`playwright_profile/**` is an optional directory tree copied into the pod-local runtime directory. When it does not exist, browser runtime starts with an empty profile. Zip-based profile import/export is intentionally outside this contract because browser profile state is already a filesystem tree and Kubernetes volumes can mount it directly.
+## Gateway Boundary
 
-Profile writeback targets a separate writable root, never the read-only DataSource mount. It copies the runtime profile into a sibling temp directory and applies the requested owner before publication. An absent target is published with one `os.replace(...)`. An existing non-empty target is published in a Linux container with one `renameat2(RENAME_EXCHANGE)`, after which the old tree is removed from the former temp path and the parent directory is fsynced. This preserves a target directory at every namespace-visible instant. Existing-target writeback requires Linux and filesystem support for `RENAME_EXCHANGE`; there is no two-rename fallback because that would reintroduce a target-absence window. Ownership and permissions must not change after publication.
+`browser-vpn-runtime-vpn-egress` creates `/runtime/vpn-egress/` and writes four runtime contracts: Dante configuration, IPv4/IPv6 firewall setup, OpenVPN hooks, and Supervisor configuration. Before replacing the container resolver configuration, it resolves every named OpenVPN `remote` through the bootstrap resolver and pins the returned addresses in the container hosts file. This gives OpenVPN a DNS-independent reconnect path for the lifetime of that container; a container restart refreshes the provider endpoint addresses. The gateway then installs explicit public target DNS endpoints. Dante runs as the constrained proxy user, so its target DNS requests can reach those endpoints only over `tun0`. The gateway installs firewall state and starts Supervisor in the foreground.
 
-`codex_profile/**` is an optional reserved sibling tree for agent or Codex runtime state. This package does not inspect it, so callers can evolve that profile independently.
+The gateway uses Alpine-packaged `openvpn`, `dante-server`, and `supervisor`; it does not implement a proxy itself. Dante listens on `0.0.0.0:1080`, selects `tun0` as its external interface, supports SOCKS5 TCP `connect` requests, and executes ordinary target traffic as the dedicated `vpnproxy` user. Its proxy listener remains unavailable until the OpenVPN up hook starts or restarts it.
 
-## Kubernetes Boundary
+The generated IPv4 and IPv6 owner chains apply only to `vpnproxy` output. They allow `ESTABLISHED,RELATED` replies and `NEW` packets whose output interface is `tun0`, then drop every remaining packet. This prevents a proxy target connection from leaking through `eth0` or another non-tunnel route while still allowing the root-owned OpenVPN transport to establish the tunnel.
 
-The reference Kubernetes shape has two separate runtime units:
+OpenVPN runs with `--persist-tun` and `--script-security 2`. Its initial up hook starts Dante. Before a reconnect changes tunnel state, the down hook sends `SIGSTOP` to Dante. The process and listening socket remain present, new SOCKS requests wait in the kernel, and the owner-only firewall remains the fail-closed egress boundary while tunnel traffic is unavailable. The next up hook sends `SIGCONT` followed by `SIGHUP`, allowing queued requests to continue after Dante reloads the current `tun0` interface configuration. `persist-tun` may retain interface state for some reconnect paths, but it is not a guarantee that `tun0`, its address, or routes survive a reconnect with changed pushed ifconfig. No browser process depends on that assumption.
 
-- `workflow-runtime`: the workflow executor container or pod that runs DBOS, Codex, package installation, ordinary network calls, and non-browser work through the normal cluster network.
-- `browser-runtime`: a dedicated pod or service for browser traffic; it contains an `openvpn` container and one `playwright-mcp` container that share that pod network namespace.
+## Browser Boundary
 
-The workflow runtime must not run in the OpenVPN network namespace. OpenVPN route changes must affect only the browser runtime pod, because Codex itself, dependency installation, DBOS, and other non-browser network calls must use the normal network path. Codex receives only the HTTP MCP URL of the browser runtime service and uses that MCP server when a step needs browser access.
+The browser launcher requires one strict `--vpn-proxy-server hostname:port` value. It resolves that hostname immediately before launch, retains the literal IP and port for the launched process, and uses TCP readiness against exactly that endpoint. The browser never checks gateway metadata, OpenVPN state, routes, or `tun0`.
 
-The `openvpn` container owns VPN process startup and tunnel lifecycle. The `browser-runtime` container launches the real `browser-vpn-runtime-playwright-mcp` executable and owns browser launch, profile materialization, stealth setup, locale, timezone, viewport, and artifact output. These two containers share only the browser pod network namespace, so workflow execution remains on the normal cluster network. The external DataSource claim is mounted read-only at `/input/.secret`, `/runtime` is writable pod-local state, `/dev/net/tun` is mounted only into OpenVPN, `/runtime-profile` is a mutable profile claim, and `/output` is a shared external artifact volume. The `openvpn` sidecar creates `/runtime/openvpn-auth.txt` from `openvpn/config.json`, sets mode `0600`, and passes it to OpenVPN with `--auth-user-pass`.
+The generated `@playwright/mcp` `0.0.77` configuration sets `launchOptions.proxy.server` to `socks5://<literal-ip>:<port>` and disables QUIC. Playwright derives the Chromium host-resolver rule from that proxy, rejects local target hostname resolution, and excludes the literal proxy IP so Chromium can still reach the SOCKS endpoint. The runtime must not add a second host-resolver rule because Chromium would let it replace Playwright's proxy exclusion. This keeps target DNS within SOCKS5/Dante and blocks Chromium's UDP/QUIC direct path. The browser egress policy provides a separate network-level guarantee that the browser pod can reach only the gateway TCP service and cluster DNS.
 
-`deploy/k8s/runtime-capability.yaml` provides one-replica `Deployment`, TCP readiness on MCP port `8931`, a `ClusterIP` Service named `browser-vpn-runtime`, and separate claims for browser artifacts, mutable runtime profile, and profile writeback. The input DataSource claim is externally provisioned and is never declared writable. A generic filesystem claim is used instead of a Kubernetes Secret because the DataSource may contain a large arbitrary browser-profile tree that does not fit the Secret object contract. A separate workflow pod connects to `http://browser-vpn-runtime:8931/mcp` and may mount the same external artifact claim. It must not be added to the browser pod.
+The Playwright image has one least-privilege startup boundary. When Docker starts it as root, the container entrypoint creates and assigns only `/output/.playwright-mcp`, `/runtime`, and `/runtime-profile`, then drops supplementary groups, group identity, and user identity before executing the requested command as `browser`. This permits a brand-new bind-mounted output root without running Chromium or MCP as root. When the platform already selects the browser UID, the same entrypoint creates accessible directories and executes directly without ownership or identity changes; this preserves the Kubernetes `runAsNonRoot` contract.
 
-`deploy/k8s/profile-writeback-job.yaml` is the executable production writeback boundary and is suspended by default. The caller first scales the browser Deployment to zero and waits for its pod to disappear, applies a fresh Job, and explicitly clears `spec.suspend`. The Job then mounts the runtime-profile claim read-only, invokes `browser-vpn-runtime-playwright-profile-snapshot`, and publishes into the writable writeback claim. It publishes as its process owner by default; a platform that requires another UID/GID adds the CLI owner arguments before unsuspending the Job. Ownership changes after publication are forbidden. Running the Job beside a live browser replica is forbidden because Chromium may still mutate the source profile. The platform consumes the completed writeback claim and owns synchronization into its DataSource implementation. Production consumers may specialize images, resources, storage classes, claim names, and owner IDs while preserving these network, mount, shutdown, and atomic-publication boundaries.
+An OpenVPN reconnect may still interrupt a target TCP connection that was already in flight. The Playwright MCP process remains available. For its single workflow client, `browser_close` disposes the current MCP backend, browser context, and Chromium process; the next browser tool creates a fresh backend. Workflow runtime recovery uses that boundary only after a connection-level navigation failure, after a bounded wait, so Chromium does not retain failed-proxy state across the retry. This is browser-context recovery inside one action attempt, not an MCP proxy or a workflow-step retry.
 
-## OpenVPN Boundary
+The browser runtime still owns profile materialization, one persistent `userDataDir`, headed Chromium under `xvfb-run`, Playwright stealth setup, locale, timezone, viewport, and output artifacts. `BrowserLocaleConfig` is the shared source for context locale, HTTP language preference, profile language preferences, and `navigator.languages` override. Its defaults remain generic: `en-US` and `UTC`.
 
-OpenVPN config validation has two layers:
+## Kubernetes Reference
 
-- `BrowserRuntimeConfig` validates the user-facing `openvpn_config_name` syntax when it is not empty.
-- `openvpn_config_validate(...)` reads `openvpn/config.json`, validates the same syntax, and checks that the named file exists under `openvpn/`.
-- `openvpn_auth_file_write(...)` writes the runtime `--auth-user-pass` file into pod-local writable storage without mutating the private DataSource mount.
+The reference manifest contains two Deployment/Service pairs:
 
-The runtime never accepts fallback names, alternate paths, absolute paths, or path traversal. Absent `openvpn/config.json` means no-VPN runtime. Invalid present config returns a not-ready runtime state or raises `OpenVpnConfigError` at the validation helper boundary.
+- `vpn-egress` mounts the full DataSource and `/dev/net/tun`, runs as root with only `NET_ADMIN`, and exposes TCP `1080`.
+- `browser-mcp` runs the MCP service on TCP `8931`, mounts profile input through a `playwright_profile` subPath, has no tunnel device or `NET_ADMIN`, and receives `vpn-egress:1080` as its only proxy endpoint.
 
-The DataSource-owned `.ovpn` file selects remote endpoints and transports. The runtime does not rewrite that file or choose UDP versus TCP for the caller. A consumer that requires TCP-only operation must provide a config containing only TCP remotes.
+The reference requires the source PVC to contain `playwright_profile/`; an empty directory represents the first-run profile. This is a Kubernetes `subPath` prerequisite, not a browser runtime requirement for direct non-Kubernetes use.
 
-The OpenVPN sidecar always adds `--persist-tun` to the validated config invocation. This runtime-owned stability policy keeps the TUN interface and its route configuration across `SIGUSR1` and `--ping-restart` reconnects, so a browser in the shared network namespace does not observe a route teardown and interface recreation as `ERR_NETWORK_CHANGED`. A prolonged or terminal remote outage may still produce a browser timeout or another structured network failure; `persist-tun` does not convert an unavailable VPN endpoint into a successful request.
+`browser-mcp-egress-deny` permits only TCP `1080` to gateway pods and TCP/UDP `53` to kube-dns. The workflow executor remains in a separate pod or runtime and connects to the browser MCP Service. It does not join either network namespace and it does not receive OpenVPN credentials.
 
-Reconnect verification must run repeated MCP browser navigations while forcing an OpenVPN `SIGUSR1` restart. The verification passes only when the `tun0` interface index remains stable, OpenVPN does not close and recreate the TUN interface or its routes, and no MCP navigation response contains `ERR_NETWORK_CHANGED`. A separate MCP retry proxy is not part of the runtime while this lower-level invariant holds; it becomes justified only if the same verification still exposes a transient navigation failure after tunnel persistence is active.
+The profile writeback Job stays independent of the long-running browser Deployment. The browser Deployment must be scaled to zero before the Job copies and atomically publishes the mutable profile state.
 
-## Playwright Boundary
+## Verification Contract
 
-Playwright profile helpers operate on directory trees:
-
-- `playwright_profile_materialize(data_source_path, target_profile_path)` copies `<data-source>/playwright_profile/**` to the pod-local profile path only when the target path does not already exist.
-- `playwright_profile_snapshot(runtime_profile_path, writeback_root_path)` copies a runtime profile tree into a sibling temp tree, applies requested ownership, and publishes `<writeback-root>/playwright_profile/**` with the atomic Linux contract above.
-- `browser-vpn-runtime-playwright-profile-snapshot` exposes the same domain-neutral writeback boundary to production callers and returns the published state as JSON.
-- `BrowserRuntime.playwright_runtime_context_get()` materializes the profile and returns the profile path, typed locale configuration, timezone, and viewport settings for caller-owned Playwright launch code.
-
-The helpers do not know what sites or workflows use the profile. They also do not read domain-specific files inside the tree.
-
-Browser-bound extraction belongs to the caller's Playwright page/context code. Direct HTTP clients are not the primary extraction route for this capability because they bypass browser profile state, browser JavaScript behavior, and the OpenVPN browser-runtime boundary.
-
-`browser-vpn-runtime-playwright-mcp` owns Playwright MCP startup for workflow projects that expose browser tools to Codex. Consumers start one launcher process per workflow run inside the browser runtime pod and configure Codex in the workflow runtime with that process HTTP MCP URL. Consumers pass only the mounted DataSource path, pod-local runtime paths, caller-owned writable `.playwright-mcp` artifact namespace, bind host, allowed MCP host names, port, and the mandatory OpenVPN flag. When the workflow runtime connects through a Kubernetes Service or Docker Compose service name, that host name must be present in `--allowed-hosts`; otherwise `@playwright/mcp` rejects the connection before Codex can use the browser. The consumer repository must not configure Codex to execute `@playwright/mcp`, `npx`, or another Playwright MCP launcher directly because package selection, profile materialization, readiness checks, stealth initialization, locale, timezone, viewport, output directory, and VPN route checks belong to this runtime capability.
-
-`--output-dir` is the caller-owned writable `.playwright-mcp` artifact namespace used by Playwright MCP file output, for example `/output/.playwright-mcp/current`. Passing the workflow output root itself is forbidden because Playwright MCP writes automatic page and console artifacts directly under `outputDir`. Browser tools can write workflow evidence only under the configured MCP `outputDir` or `/app`, so consumers that need shared evidence artifacts must pass a subdirectory inside their shared output root as `--output-dir`. `--mcp-config-path` and `--persistent-profile-path` remain pod-local runtime-scoped paths; generated `config.json`, the `playwright_stealth` init script, and the mutable browser profile must not be placed under the shared evidence root only because `--output-dir` points there.
-
-The launcher uses one browser stack: headed Chromium through `xvfb-run`, persistent `userDataDir`, `sharedBrowserContext`, `playwright_stealth` init script, 1920x1080 viewport by default, and file-backed MCP artifacts under the caller-owned `.playwright-mcp` namespace. `BrowserLocaleConfig` is the single typed owner of the browser locale and derives the HTTP, Chromium preference, and stealth navigator language forms. Its neutral default is `en-US`; consumers pass another locale explicitly, and browser defaults do not infer locale from caller domain data. Timezone is independently configurable and defaults to `UTC` because locale does not determine timezone. Headless fallback, per-step profile directories, direct `npx` execution, and caller-owned browser flags are outside this runtime contract.
-
-## Readiness Contract
-
-`BrowserRuntime.readiness_check()` returns strict Pydantic state with:
-
-- OpenVPN config name,
-- persistent profile path,
-- typed locale configuration, timezone, and viewport,
-- readiness boolean,
-- explicit problem list.
-
-The CLI entrypoint `browser-vpn-runtime-readiness` exposes the same check for container startup probes or smoke tests. `--require-vpn-route` adds a network-namespace check for visible `tun0`; workflows that require an active VPN route may enable it, and local fixture checks may omit it when they only validate secret layout.
+Behavior tests cover strict OpenVPN input validation, generated gateway files and firewall policy, literal proxy configuration, launcher-owned SOCKS5 TCP reachability, and Kubernetes resource relationships. Platform TCP healthchecks own Playwright MCP service readiness; no separate always-successful readiness API or container default command exists. Container integration still requires a cluster or local container runtime with an actual `/dev/net/tun`, valid OpenVPN credentials, and a reachable VPN endpoint; unit tests cannot prove provider-side tunnel establishment or Internet egress.

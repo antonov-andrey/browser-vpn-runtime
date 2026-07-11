@@ -5,14 +5,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
-from browser_vpn_runtime.config import openvpn_config_name_validate
-
 
 class OpenVpnConfigError(RuntimeError):
     """Raised when OpenVPN DataSource configuration is invalid."""
 
 
-class OpenVpnConfigDocument(BaseModel):
+class _OpenVpnConfigDocument(BaseModel):
     """Strict representation of openvpn/config.json."""
 
     model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True, validate_default=True)
@@ -33,23 +31,29 @@ class OpenVpnConfigDocument(BaseModel):
             Validated OpenVPN config file name.
         """
 
-        return openvpn_config_name_validate(openvpn_config_name)
+        if not openvpn_config_name:
+            raise ValueError("openvpn_config_name must not be empty")
+        if "/" in openvpn_config_name:
+            raise ValueError("openvpn_config_name must be one file name without '/'")
+        if ".." in openvpn_config_name:
+            raise ValueError("openvpn_config_name must not contain '..'")
+        if Path(openvpn_config_name).is_absolute():
+            raise ValueError("openvpn_config_name must not be an absolute path")
+        if not openvpn_config_name.endswith(".ovpn"):
+            raise ValueError("openvpn_config_name must name a .ovpn file")
+        return openvpn_config_name
 
 
-class OpenVpnConfigState(BaseModel):
-    """Validated OpenVPN config state."""
+class OpenVpnLaunchConfig(BaseModel):
+    """Paths required to launch OpenVPN with generated authentication."""
 
     model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True, validate_default=True)
 
-    auth_file_path: Path | None = None
-    login: str
-    openvpn_config_name: str
+    auth_file_path: Path
     openvpn_config_path: Path
-    openvpn_metadata_path: Path
-    password: str
 
 
-def openvpn_config_load(data_source_path: Path) -> OpenVpnConfigDocument:
+def _openvpn_config_load(data_source_path: Path) -> _OpenVpnConfigDocument:
     """Load and validate openvpn/config.json from a DataSource directory.
 
     Args:
@@ -65,7 +69,7 @@ def openvpn_config_load(data_source_path: Path) -> OpenVpnConfigDocument:
     openvpn_metadata_path = data_source_path / "openvpn" / "config.json"
     try:
         payload = json.loads(openvpn_metadata_path.read_text(encoding="utf-8"))
-        return OpenVpnConfigDocument(**payload)
+        return _OpenVpnConfigDocument(**payload)
     except FileNotFoundError as exc:
         raise OpenVpnConfigError(f"missing OpenVPN metadata file: {openvpn_metadata_path}") from exc
     except json.JSONDecodeError as exc:
@@ -74,34 +78,7 @@ def openvpn_config_load(data_source_path: Path) -> OpenVpnConfigDocument:
         raise OpenVpnConfigError(f"invalid OpenVPN metadata contract: {openvpn_metadata_path}") from exc
 
 
-def openvpn_config_validate(data_source_path: Path) -> OpenVpnConfigState:
-    """Validate openvpn/config.json and its named .ovpn file.
-
-    Args:
-        data_source_path: DataSource root path.
-
-    Returns:
-        Validated OpenVPN config state.
-
-    Raises:
-        OpenVpnConfigError: If metadata or the named .ovpn file is invalid.
-    """
-
-    openvpn_config_document = openvpn_config_load(data_source_path)
-    openvpn_metadata_path = data_source_path / "openvpn" / "config.json"
-    openvpn_config_path = data_source_path / "openvpn" / openvpn_config_document.openvpn_config_name
-    if not openvpn_config_path.is_file():
-        raise OpenVpnConfigError(f"missing OpenVPN config file: {openvpn_config_path}")
-    return OpenVpnConfigState(
-        login=openvpn_config_document.login,
-        openvpn_config_name=openvpn_config_document.openvpn_config_name,
-        openvpn_config_path=openvpn_config_path,
-        openvpn_metadata_path=openvpn_metadata_path,
-        password=openvpn_config_document.password,
-    )
-
-
-def openvpn_auth_file_write(data_source_path: Path, runtime_path: Path) -> OpenVpnConfigState:
+def openvpn_auth_file_write(data_source_path: Path, runtime_path: Path) -> OpenVpnLaunchConfig:
     """Write OpenVPN auth-user-pass file into pod-local runtime storage.
 
     Args:
@@ -109,25 +86,24 @@ def openvpn_auth_file_write(data_source_path: Path, runtime_path: Path) -> OpenV
         runtime_path: Writable pod-local runtime directory.
 
     Returns:
-        Validated OpenVPN config state with the generated auth file path.
+        Minimal OpenVPN launch configuration.
 
     Raises:
         OpenVpnConfigError: If metadata or the named .ovpn file is invalid.
     """
 
-    openvpn_config_state = openvpn_config_validate(data_source_path)
+    openvpn_config_document = _openvpn_config_load(data_source_path)
+    openvpn_config_path = data_source_path / "openvpn" / openvpn_config_document.openvpn_config_name
+    if not openvpn_config_path.is_file():
+        raise OpenVpnConfigError(f"missing OpenVPN config file: {openvpn_config_path}")
     runtime_path.mkdir(parents=True, exist_ok=True)
     auth_file_path = runtime_path / "openvpn-auth.txt"
     auth_file_path.write_text(
-        f"{openvpn_config_state.login}\n{openvpn_config_state.password}\n",
+        f"{openvpn_config_document.login}\n{openvpn_config_document.password}\n",
         encoding="utf-8",
     )
     auth_file_path.chmod(0o600)
-    return OpenVpnConfigState(
+    return OpenVpnLaunchConfig(
         auth_file_path=auth_file_path,
-        login=openvpn_config_state.login,
-        openvpn_config_name=openvpn_config_state.openvpn_config_name,
-        openvpn_config_path=openvpn_config_state.openvpn_config_path,
-        openvpn_metadata_path=openvpn_config_state.openvpn_metadata_path,
-        password=openvpn_config_state.password,
+        openvpn_config_path=openvpn_config_path,
     )

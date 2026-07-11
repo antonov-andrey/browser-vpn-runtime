@@ -1,31 +1,62 @@
 """Strict runtime configuration models."""
 
+import re
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+DEFAULT_BROWSER_LOCALE = "en-US"
+DEFAULT_BROWSER_TIMEZONE = "UTC"
 
-def openvpn_config_name_validate(openvpn_config_name: str) -> str:
-    """Validate one OpenVPN config file name.
 
-    Args:
-        openvpn_config_name: Config file name from runtime config or openvpn/config.json.
+class BrowserLocaleConfig(BaseModel):
+    """Validated locale with deterministic browser language representations."""
 
-    Returns:
-        Validated config file name.
-    """
+    model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True, validate_default=True)
 
-    if not openvpn_config_name:
-        raise ValueError("openvpn_config_name must not be empty")
-    if "/" in openvpn_config_name:
-        raise ValueError("openvpn_config_name must be one file name without '/'")
-    if ".." in openvpn_config_name:
-        raise ValueError("openvpn_config_name must not contain '..'")
-    if Path(openvpn_config_name).is_absolute():
-        raise ValueError("openvpn_config_name must not be an absolute path")
-    if not openvpn_config_name.endswith(".ovpn"):
-        raise ValueError("openvpn_config_name must name a .ovpn file")
-    return openvpn_config_name
+    locale: str = DEFAULT_BROWSER_LOCALE
+
+    @property
+    def accept_language(self) -> str:
+        """Return the HTTP language preference derived from navigator languages."""
+
+        return ",".join(
+            language if index == 0 else f"{language};q={1 - index / 10:.1f}"
+            for index, language in enumerate(self.navigator_language_list)
+        )
+
+    @property
+    def navigator_language_list(self) -> list[str]:
+        """Return ordered unique navigator languages for the configured locale."""
+
+        language_list = [self.locale]
+        base_language = self.locale.split("-", maxsplit=1)[0]
+        for language in [base_language, "en-US", "en"]:
+            if language not in language_list:
+                language_list.append(language)
+        return language_list
+
+    @property
+    def profile_language(self) -> str:
+        """Return the comma-separated language preference stored by Chromium."""
+
+        return ",".join(self.navigator_language_list)
+
+    @field_validator("locale")
+    @classmethod
+    def _locale_validate(cls, locale: str) -> str:
+        """Validate a browser locale as a BCP 47-style language tag.
+
+        Args:
+            locale: Candidate browser locale.
+
+        Returns:
+            Validated browser locale.
+        """
+
+        if re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", locale) is None:
+            raise ValueError("locale must be a BCP 47-style language tag")
+        return locale
 
 
 class BrowserRuntimeConfig(BaseModel):
@@ -34,56 +65,8 @@ class BrowserRuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True, validate_default=True)
 
     data_source_path: Path
-    locale: str = "tr-TR"
-    openvpn_config_name: str = ""
+    locale_config: BrowserLocaleConfig = Field(default_factory=BrowserLocaleConfig)
     persistent_profile_path: Path = Path("/runtime/playwright_profile")
-    require_vpn_route: bool = False
-    timezone: str = "Europe/Istanbul"
+    timezone: str = DEFAULT_BROWSER_TIMEZONE
     viewport_height: int = Field(default=1080, ge=1)
     viewport_width: int = Field(default=1920, ge=1)
-
-    @field_validator("openvpn_config_name")
-    @classmethod
-    def _openvpn_config_name_validate(cls, openvpn_config_name: str) -> str:
-        """Validate OpenVPN config file name syntax.
-
-        Args:
-            openvpn_config_name: Candidate OpenVPN config file name.
-
-        Returns:
-            Validated OpenVPN config file name.
-        """
-
-        if not openvpn_config_name:
-            return ""
-        return openvpn_config_name_validate(openvpn_config_name)
-
-    @property
-    def codex_profile_path(self) -> Path:
-        """Return the conventional Codex profile path inside the DataSource."""
-
-        return self.data_source_path / "codex_profile"
-
-    @property
-    def openvpn_config_path(self) -> Path:
-        """Return the expected OpenVPN config path inside the DataSource."""
-
-        return self.openvpn_path / self.openvpn_config_name
-
-    @property
-    def openvpn_metadata_path(self) -> Path:
-        """Return the OpenVPN metadata config path inside the DataSource."""
-
-        return self.openvpn_path / "config.json"
-
-    @property
-    def openvpn_path(self) -> Path:
-        """Return the conventional OpenVPN DataSource directory."""
-
-        return self.data_source_path / "openvpn"
-
-    @property
-    def playwright_profile_path(self) -> Path:
-        """Return the conventional Playwright profile path inside the DataSource."""
-
-        return self.data_source_path / "playwright_profile"

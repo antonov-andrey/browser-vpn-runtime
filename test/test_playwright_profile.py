@@ -1,7 +1,9 @@
 """Tests for Playwright profile materialization and snapshot helpers."""
 
+import json
 from pathlib import Path
 import shutil
+import sys
 
 import pytest
 
@@ -108,38 +110,192 @@ def test_playwright_profile_snapshot_copies_runtime_tree_back_to_data_source(tmp
     assert snapshot_file_path.read_text(encoding="utf-8") == "storage"
 
 
-def test_playwright_profile_snapshot_sets_owner_before_atomic_publish(
+def test_playwright_profile_snapshot_exchanges_before_cleanup_and_parent_fsync(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Prepare ownership on the temp tree before publishing it into DataSource."""
+    """Publish an existing profile with one exchange before cleanup and parent fsync."""
     runtime_profile_path = tmp_path / "runtime-profile"
     runtime_profile_path.mkdir()
     (runtime_profile_path / "Preferences").write_text("runtime", encoding="utf-8")
     data_source_path = tmp_path / "data-source"
-    event_list: list[tuple[str, str, int | None, int | None]] = []
+    target_profile_path = data_source_path / "playwright_profile"
+    target_profile_path.mkdir(parents=True)
+    (target_profile_path / "Preferences").write_text("previous", encoding="utf-8")
+    event_list: list[str] = []
+    real_directory_tree_exchange = playwright_profile._directory_tree_exchange
 
     def fake_directory_tree_owner_set(path: Path, owner_uid: int | None, owner_gid: int | None) -> None:
         """Record owner update and mark the temp tree."""
-        event_list.append(("owner", path.name, owner_uid, owner_gid))
+        assert target_profile_path.is_dir()
+        assert owner_uid == 1000
+        assert owner_gid == 1000
+        event_list.append("owner")
         (path / "owner.marker").write_text("owned", encoding="utf-8")
 
-    def fake_directory_tree_atomic_replace(source_path: Path, target_path: Path) -> None:
-        """Record atomic publish after the owner marker exists."""
-        event_list.append(("replace", source_path.name, None, None))
+    def fake_directory_tree_exchange(source_path: Path, target_path: Path) -> None:
+        """Record the atomic exchange while both directory names remain present."""
+        event_list.append("exchange")
         assert (source_path / "owner.marker").is_file()
-        if target_path.exists():
-            shutil.rmtree(target_path)
-        shutil.copytree(source_path, target_path)
+        assert (target_path / "Preferences").read_text(encoding="utf-8") == "previous"
+        real_directory_tree_exchange(source_path, target_path)
+        assert (target_path / "Preferences").read_text(encoding="utf-8") == "runtime"
+        assert (source_path / "Preferences").read_text(encoding="utf-8") == "previous"
+
+    def fake_directory_tree_remove(path: Path) -> None:
+        """Remove the exchanged old tree only while the new target remains published."""
+        event_list.append("remove")
+        assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
+        assert (path / "Preferences").read_text(encoding="utf-8") == "previous"
+        shutil.rmtree(path)
+
+    def fake_directory_fsync(path: Path) -> None:
+        """Record parent fsync after the exchanged old tree is removed."""
+        event_list.append("fsync")
+        assert path == data_source_path
+        assert target_profile_path.is_dir()
+        assert not (data_source_path / ".playwright_profile.tmp").exists()
 
     monkeypatch.setattr(playwright_profile, "_directory_tree_owner_set", fake_directory_tree_owner_set)
-    monkeypatch.setattr(playwright_profile, "_directory_tree_atomic_replace", fake_directory_tree_atomic_replace)
+    monkeypatch.setattr(playwright_profile, "_directory_tree_exchange", fake_directory_tree_exchange)
+    monkeypatch.setattr(playwright_profile, "_directory_tree_remove", fake_directory_tree_remove)
+    monkeypatch.setattr(playwright_profile, "_directory_fsync", fake_directory_fsync)
 
     state = playwright_profile_snapshot(runtime_profile_path, data_source_path, owner_uid=1000, owner_gid=1000)
 
-    assert event_list == [
-        ("owner", ".playwright_profile.tmp", 1000, 1000),
-        ("replace", ".playwright_profile.tmp", None, None),
-    ]
+    assert event_list == ["owner", "exchange", "remove", "fsync"]
     assert state.profile_path == data_source_path / "playwright_profile"
     assert (state.profile_path / "owner.marker").read_text(encoding="utf-8") == "owned"
+
+
+def test_playwright_profile_snapshot_preserves_existing_target_when_exchange_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Keep the previous profile continuously published when atomic exchange fails."""
+    runtime_profile_path = tmp_path / "runtime-profile"
+    runtime_profile_path.mkdir()
+    (runtime_profile_path / "Preferences").write_text("runtime", encoding="utf-8")
+    data_source_path = tmp_path / "data-source"
+    target_profile_path = data_source_path / "playwright_profile"
+    target_profile_path.mkdir(parents=True)
+    (target_profile_path / "Preferences").write_text("previous", encoding="utf-8")
+
+    def fake_directory_tree_exchange(source_path: Path, target_path: Path) -> None:
+        """Fail before namespace publication without removing either directory."""
+        assert source_path.is_dir()
+        assert target_path.is_dir()
+        raise OSError("exchange failed")
+
+    monkeypatch.setattr(playwright_profile, "_directory_tree_exchange", fake_directory_tree_exchange)
+
+    with pytest.raises(OSError, match="exchange failed"):
+        playwright_profile_snapshot(runtime_profile_path, data_source_path)
+
+    assert target_profile_path.is_dir()
+    assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "previous"
+    assert not (data_source_path / ".playwright_profile.tmp").exists()
+
+
+def test_playwright_profile_snapshot_keeps_new_target_when_old_tree_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Keep the new target published if cleanup fails after the atomic exchange."""
+    runtime_profile_path = tmp_path / "runtime-profile"
+    runtime_profile_path.mkdir()
+    (runtime_profile_path / "Preferences").write_text("runtime", encoding="utf-8")
+    data_source_path = tmp_path / "data-source"
+    target_profile_path = data_source_path / "playwright_profile"
+    target_profile_path.mkdir(parents=True)
+    (target_profile_path / "Preferences").write_text("previous", encoding="utf-8")
+    fsync_path_list: list[Path] = []
+
+    def fake_directory_tree_remove(path: Path) -> None:
+        """Simulate cleanup failure after publication."""
+        assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
+        assert (path / "Preferences").read_text(encoding="utf-8") == "previous"
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(playwright_profile, "_directory_tree_remove", fake_directory_tree_remove)
+    monkeypatch.setattr(playwright_profile, "_directory_fsync", fsync_path_list.append)
+
+    with pytest.raises(OSError, match="cleanup failed"):
+        playwright_profile_snapshot(runtime_profile_path, data_source_path)
+
+    assert fsync_path_list == [data_source_path]
+    assert target_profile_path.is_dir()
+    assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
+
+
+def test_playwright_profile_snapshot_uses_replace_when_target_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Publish a first profile with one replace and one parent fsync."""
+    runtime_profile_path = tmp_path / "runtime-profile"
+    runtime_profile_path.mkdir()
+    (runtime_profile_path / "Preferences").write_text("runtime", encoding="utf-8")
+    data_source_path = tmp_path / "data-source"
+    event_list: list[str] = []
+    real_replace = playwright_profile.os.replace
+
+    def fake_replace(source_path: Path, target_path: Path) -> None:
+        """Record first publication through os.replace."""
+        event_list.append("replace")
+        real_replace(source_path, target_path)
+
+    def fail_directory_tree_exchange(source_path: Path, target_path: Path) -> None:
+        """Reject an exchange for an absent target."""
+        raise AssertionError(f"unexpected exchange: {source_path} -> {target_path}")
+
+    monkeypatch.setattr(playwright_profile.os, "replace", fake_replace)
+    monkeypatch.setattr(playwright_profile, "_directory_tree_exchange", fail_directory_tree_exchange)
+    monkeypatch.setattr(playwright_profile, "_directory_fsync", lambda path: event_list.append("fsync"))
+
+    state = playwright_profile_snapshot(runtime_profile_path, data_source_path)
+
+    assert event_list == ["replace", "fsync"]
+    assert (state.profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
+
+
+def test_playwright_profile_existing_target_requires_linux(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Reject non-Linux replacement when an existing directory needs exchange semantics."""
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    monkeypatch.setattr(playwright_profile.sys, "platform", "darwin")
+
+    with pytest.raises(RuntimeError, match="Linux"):
+        playwright_profile._directory_tree_atomic_replace(source_path, target_path)
+
+
+def test_playwright_profile_snapshot_cli_publishes_generic_writeback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Expose profile writeback through a domain-neutral executable boundary."""
+    runtime_profile_path = tmp_path / "runtime-profile"
+    runtime_profile_path.mkdir()
+    (runtime_profile_path / "Preferences").write_text("runtime", encoding="utf-8")
+    writeback_root_path = tmp_path / "writeback"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "browser-vpn-runtime-playwright-profile-snapshot",
+            "--runtime-profile-path",
+            str(runtime_profile_path),
+            "--writeback-root-path",
+            str(writeback_root_path),
+        ],
+    )
+
+    exit_code = playwright_profile.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["profile_path"] == str(writeback_root_path / "playwright_profile")
+    assert (writeback_root_path / "playwright_profile" / "Preferences").read_text(encoding="utf-8") == "runtime"

@@ -1,12 +1,28 @@
 """Playwright persistent profile directory helpers."""
 
+import argparse
+import ctypes
 import os
 import shutil
+import sys
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
-CHROMIUM_SINGLETON_NAME_LIST = ["SingletonCookie", "SingletonLock", "SingletonSocket"]
+from pydantic import BaseModel, ConfigDict, Field
 
+AT_FDCWD = -100
+CHROMIUM_SINGLETON_NAME_LIST = ["SingletonCookie", "SingletonLock", "SingletonSocket"]
+RENAME_EXCHANGE = 2
+
+
+class PlaywrightProfileSnapshotConfig(BaseModel):
+    """Validated executable profile snapshot configuration."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True, validate_default=True)
+
+    owner_gid: int | None = Field(default=None, ge=0)
+    owner_uid: int | None = Field(default=None, ge=0)
+    runtime_profile_path: Path
+    writeback_root_path: Path
 
 
 class PlaywrightProfileState(BaseModel):
@@ -16,6 +32,35 @@ class PlaywrightProfileState(BaseModel):
 
     file_path_list: list[Path]
     profile_path: Path
+
+
+def _args_parse() -> argparse.Namespace:
+    """Parse the profile snapshot CLI arguments.
+
+    Returns:
+        Parsed CLI namespace.
+    """
+
+    parser = argparse.ArgumentParser(description="Atomically snapshot a runtime Playwright profile.")
+    parser.add_argument("--owner-gid", type=int)
+    parser.add_argument("--owner-uid", type=int)
+    parser.add_argument("--runtime-profile-path", required=True, type=Path)
+    parser.add_argument("--writeback-root-path", required=True, type=Path)
+    return parser.parse_args()
+
+
+def _directory_fsync(path: Path) -> None:
+    """Persist directory entry changes for one directory.
+
+    Args:
+        path: Directory whose entries must be durable.
+    """
+
+    file_descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(file_descriptor)
+    finally:
+        os.close(file_descriptor)
 
 
 def _directory_tree_copy(source_path: Path, target_path: Path) -> list[Path]:
@@ -38,26 +83,58 @@ def _directory_tree_copy(source_path: Path, target_path: Path) -> list[Path]:
 
 
 def _directory_tree_atomic_replace(source_path: Path, target_path: Path) -> None:
-    """Atomically replace one directory tree with another prepared tree.
+    """Publish one prepared directory without removing an existing target name.
 
     Args:
         source_path: Prepared sibling directory tree.
         target_path: Published target directory tree.
+
+    Raises:
+        RuntimeError: If an existing target must be exchanged outside Linux.
     """
-    backup_path = target_path.with_name(f".{target_path.name}.old")
-    if backup_path.exists():
-        shutil.rmtree(backup_path)
-    try:
-        if target_path.exists():
-            os.replace(target_path, backup_path)
+
+    if not target_path.exists():
         os.replace(source_path, target_path)
-    except Exception:
-        if not target_path.exists() and backup_path.exists():
-            os.replace(backup_path, target_path)
-        raise
+        _directory_fsync(target_path.parent)
+        return
+    if sys.platform != "linux":
+        raise RuntimeError("atomic replacement of an existing profile directory requires Linux renameat2")
+    _directory_tree_exchange(source_path, target_path)
+    try:
+        _directory_tree_remove(source_path)
     finally:
-        if backup_path.exists():
-            shutil.rmtree(backup_path)
+        _directory_fsync(target_path.parent)
+
+
+def _directory_tree_exchange(source_path: Path, target_path: Path) -> None:
+    """Exchange two existing sibling directory names atomically on Linux.
+
+    Args:
+        source_path: Prepared new directory tree.
+        target_path: Currently published directory tree.
+
+    Raises:
+        OSError: If Linux cannot perform `renameat2(RENAME_EXCHANGE)`.
+        RuntimeError: If libc does not expose the required Linux primitive.
+    """
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        renameat2 = libc.renameat2
+    except AttributeError as exc:
+        raise RuntimeError("Linux libc must expose renameat2 for atomic profile replacement") from exc
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        AT_FDCWD,
+        os.fsencode(source_path),
+        AT_FDCWD,
+        os.fsencode(target_path),
+        RENAME_EXCHANGE,
+    )
+    if result != 0:
+        errno_value = ctypes.get_errno()
+        raise OSError(errno_value, os.strerror(errno_value), f"{source_path} <-> {target_path}")
 
 
 def _directory_tree_owner_set(path: Path, owner_uid: int | None, owner_gid: int | None) -> None:
@@ -75,6 +152,16 @@ def _directory_tree_owner_set(path: Path, owner_uid: int | None, owner_gid: int 
     os.chown(path, uid, gid)
     for child_path in path.rglob("*"):
         os.chown(child_path, uid, gid)
+
+
+def _directory_tree_remove(path: Path) -> None:
+    """Remove one unpublished directory tree.
+
+    Args:
+        path: Directory tree to remove.
+    """
+
+    shutil.rmtree(path)
 
 
 def playwright_profile_materialize(data_source_path: Path, target_profile_path: Path) -> PlaywrightProfileState:
@@ -104,15 +191,15 @@ def playwright_profile_materialize(data_source_path: Path, target_profile_path: 
 
 def playwright_profile_snapshot(
     runtime_profile_path: Path,
-    data_source_path: Path,
+    writeback_root_path: Path,
     owner_uid: int | None = None,
     owner_gid: int | None = None,
 ) -> PlaywrightProfileState:
-    """Copy a pod-local profile directory back to DataSource playwright_profile.
+    """Publish a pod-local profile directory under one writable writeback root.
 
     Args:
         runtime_profile_path: Runtime profile directory to snapshot.
-        data_source_path: DataSource root that receives playwright_profile.
+        writeback_root_path: Writable root that receives playwright_profile.
         owner_uid: Host owner user id to set before publishing.
         owner_gid: Host owner group id to set before publishing.
 
@@ -120,9 +207,9 @@ def playwright_profile_snapshot(
         Snapshotted profile state.
     """
 
-    target_profile_path = data_source_path / "playwright_profile"
-    temp_profile_path = data_source_path / ".playwright_profile.tmp"
-    data_source_path.mkdir(parents=True, exist_ok=True)
+    target_profile_path = writeback_root_path / "playwright_profile"
+    temp_profile_path = writeback_root_path / ".playwright_profile.tmp"
+    writeback_root_path.mkdir(parents=True, exist_ok=True)
     if temp_profile_path.exists():
         shutil.rmtree(temp_profile_path)
     try:
@@ -134,3 +221,25 @@ def playwright_profile_snapshot(
             shutil.rmtree(temp_profile_path)
     file_path_list = sorted(path for path in target_profile_path.rglob("*") if path.is_file())
     return PlaywrightProfileState(file_path_list=file_path_list, profile_path=target_profile_path)
+
+
+def main() -> int:
+    """Run the generic profile snapshot executable boundary.
+
+    Returns:
+        Process exit code.
+    """
+
+    config = PlaywrightProfileSnapshotConfig(**vars(_args_parse()))
+    state = playwright_profile_snapshot(
+        owner_gid=config.owner_gid,
+        owner_uid=config.owner_uid,
+        runtime_profile_path=config.runtime_profile_path,
+        writeback_root_path=config.writeback_root_path,
+    )
+    print(state.model_dump_json(indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

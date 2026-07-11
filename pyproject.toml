@@ -5,21 +5,26 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "browser-vpn-runtime"
 version = "0.1.0"
-description = "Reusable browser and OpenVPN runtime capability skeleton."
+description = "Reusable browser runtime with a separate OpenVPN SOCKS5 egress gateway."
 requires-python = ">=3.14"
 dependencies = [
     "pydantic>=2.13,<3",
-    "playwright-stealth>=2.0.0,<3",
 ]
 
 [project.optional-dependencies]
+browser = [
+    "playwright-stealth>=2.0.0,<3",
+]
 test = [
+    "PyYAML>=6,<7",
     "pytest>=9,<10",
 ]
 
 [project.scripts]
+browser-vpn-runtime-container-entrypoint = "browser_vpn_runtime.container_entrypoint:main"
 browser-vpn-runtime-playwright-mcp = "browser_vpn_runtime.playwright_mcp:main"
-browser-vpn-runtime-readiness = "browser_vpn_runtime.runtime:main"
+browser-vpn-runtime-playwright-profile-snapshot = "browser_vpn_runtime.playwright_profile:main"
+browser-vpn-runtime-vpn-egress = "browser_vpn_runtime.vpn_gateway:main"
 
 [tool.setuptools.packages.find]
 include = ["browser_vpn_runtime*"]

@@ -2,9 +2,11 @@ FROM python:3.14-alpine
 
 WORKDIR /app
 
-RUN apk add --no-cache openvpn \
-    && pip install --no-cache-dir "pydantic>=2.13,<3"
+COPY pyproject.toml ./
+COPY browser_vpn_runtime ./browser_vpn_runtime
 
-COPY browser_vpn_runtime /app/browser_vpn_runtime
+RUN apk add --no-cache dante-server iptables openvpn supervisor \
+    && adduser -D -H -s /sbin/nologin vpnproxy \
+    && pip install --no-cache-dir .
 
-ENTRYPOINT ["python", "-m", "browser_vpn_runtime.openvpn_sidecar"]
+ENTRYPOINT ["browser-vpn-runtime-vpn-egress"]

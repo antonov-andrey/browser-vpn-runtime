@@ -1,47 +1,238 @@
 apiVersion: v1
-kind: Pod
+kind: PersistentVolumeClaim
 metadata:
-  name: browser-vpn-runtime
-  labels:
-    app.kubernetes.io/name: browser-vpn-runtime
+  name: browser-vpn-runtime-artifact-output
 spec:
-  restartPolicy: Never
-  volumes:
-    - name: runtime-data-source
-      secret:
-        secretName: browser-vpn-runtime-data-source
-    - name: runtime-work
-      emptyDir: {}
-  containers:
-    - name: openvpn
-      image: browser-vpn-runtime-openvpn:latest
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: browser-vpn-runtime-profile-runtime
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: browser-vpn-runtime-profile-writeback
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vpn-egress
+  labels:
+    app.kubernetes.io/name: vpn-egress
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vpn-egress
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vpn-egress
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: runtime-data-source
+          persistentVolumeClaim:
+            claimName: browser-vpn-runtime-data-source
+            readOnly: true
+        - name: runtime-work
+          emptyDir: {}
+        - name: tun-device
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+      containers:
+        - name: vpn-egress
+          image: browser-vpn-runtime-openvpn:latest
+          command:
+            - browser-vpn-runtime-vpn-egress
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+            runAsUser: 0
+          ports:
+            - name: socks5
+              containerPort: 1080
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: socks5
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 12
+          volumeMounts:
+            - name: runtime-data-source
+              mountPath: /input/.secret
+              readOnly: true
+            - name: runtime-work
+              mountPath: /runtime
+            - name: tun-device
+              mountPath: /dev/net/tun
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vpn-egress
+spec:
+  selector:
+    app.kubernetes.io/name: vpn-egress
+  ports:
+    - name: socks5
+      port: 1080
+      protocol: TCP
+      targetPort: socks5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: browser-mcp
+  labels:
+    app.kubernetes.io/name: browser-mcp
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: browser-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: browser-mcp
+    spec:
+      restartPolicy: Always
       securityContext:
-        capabilities:
-          add:
-            - NET_ADMIN
-        runAsUser: 0
-      volumeMounts:
+        fsGroup: 1000
+      volumes:
+        - name: artifact-output
+          persistentVolumeClaim:
+            claimName: browser-vpn-runtime-artifact-output
+        - name: profile-runtime
+          persistentVolumeClaim:
+            claimName: browser-vpn-runtime-profile-runtime
         - name: runtime-data-source
-          mountPath: /data-source
-          readOnly: true
+          persistentVolumeClaim:
+            claimName: browser-vpn-runtime-data-source
+            readOnly: true
         - name: runtime-work
-          mountPath: /runtime
-    - name: browser-runtime
-      image: browser-vpn-runtime-playwright:latest
-      args:
-        - --data-source-path
-        - /data-source
-        - --openvpn-config-name
-        - client.ovpn
-        - --persistent-profile-path
-        - /runtime/playwright_profile
-        - --require-vpn-route
-      env:
-        - name: TZ
-          value: UTC
-      volumeMounts:
-        - name: runtime-data-source
-          mountPath: /data-source
-          readOnly: true
-        - name: runtime-work
-          mountPath: /runtime
+          emptyDir: {}
+      containers:
+        - name: browser-mcp
+          image: browser-vpn-runtime-playwright:latest
+          args:
+            - browser-vpn-runtime-playwright-mcp
+            - --data-source-path
+            - /input/.secret
+            - --persistent-profile-path
+            - /runtime-profile/playwright_profile
+            - --output-dir
+            - /output/.playwright-mcp/current
+            - --mcp-config-path
+            - /runtime/playwright_mcp/config.json
+            - --host
+            - 0.0.0.0
+            - --allowed-hosts
+            - localhost,127.0.0.1,browser-mcp
+            - --port
+            - "8931"
+            - --vpn-proxy-server
+            - vpn-egress:1080
+          env:
+            - name: TZ
+              value: UTC
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 1000
+          ports:
+            - name: mcp
+              containerPort: 8931
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: mcp
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 12
+          volumeMounts:
+            - name: artifact-output
+              mountPath: /output
+            - name: profile-runtime
+              mountPath: /runtime-profile
+            - name: runtime-data-source
+              mountPath: /input/.secret/playwright_profile
+              readOnly: true
+              subPath: playwright_profile
+            - name: runtime-work
+              mountPath: /runtime
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: browser-mcp
+spec:
+  selector:
+    app.kubernetes.io/name: browser-mcp
+  ports:
+    - name: mcp
+      port: 8931
+      protocol: TCP
+      targetPort: mcp
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: browser-mcp-egress-deny
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: browser-mcp
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vpn-egress
+      ports:
+        - port: 1080
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: TCP
+        - port: 53
+          protocol: UDP
