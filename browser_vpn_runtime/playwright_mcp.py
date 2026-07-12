@@ -18,9 +18,8 @@ from browser_vpn_runtime.config import (
     DEFAULT_BROWSER_LOCALE,
     DEFAULT_BROWSER_TIMEZONE,
     BrowserLocaleConfig,
-    BrowserRuntimeConfig,
 )
-from browser_vpn_runtime.runtime import BrowserRuntime
+from browser_vpn_runtime.playwright_profile import playwright_profile_materialize
 
 DEFAULT_ACTION_TIMEOUT_MS = 30000
 DEFAULT_ALLOWED_HOST_LIST = ["localhost", "127.0.0.1"]
@@ -433,30 +432,24 @@ def playwright_mcp_command_argv_get(config: PlaywrightMcpConfig) -> list[str]:
         PlaywrightMcpError: If the configured VPN proxy cannot be resolved or reached.
     """
 
-    runtime_config = BrowserRuntimeConfig(
+    playwright_profile_state = playwright_profile_materialize(
         data_source_path=config.data_source_path,
-        locale_config=config.locale_config,
-        persistent_profile_path=config.persistent_profile_path,
-        timezone=config.timezone,
-        viewport_height=config.viewport_height,
-        viewport_width=config.viewport_width,
+        target_profile_path=config.persistent_profile_path,
     )
-    runtime = BrowserRuntime(runtime_config)
     vpn_proxy_ip, vpn_proxy_port = _vpn_proxy_server_resolve(config.vpn_proxy_server)
     vpn_proxy_server = _vpn_proxy_server_literal_get(proxy_ip=vpn_proxy_ip, proxy_port=vpn_proxy_port)
     _vpn_proxy_wait(config=config, proxy_ip=vpn_proxy_ip, proxy_port=vpn_proxy_port)
-    runtime_context = runtime.playwright_runtime_context_get()
     config.output_dir.mkdir(parents=True, exist_ok=True)
     _profile_language_preference_sync(
-        locale_config=runtime_context.locale_config,
-        profile_path=runtime_context.persistent_profile_path,
+        locale_config=config.locale_config,
+        profile_path=playwright_profile_state.profile_path,
     )
     stealth_script_path = config.mcp_config_path.with_suffix(".stealth.js")
-    _stealth_script_write(locale_config=runtime_context.locale_config, stealth_script_path=stealth_script_path)
+    _stealth_script_write(locale_config=config.locale_config, stealth_script_path=stealth_script_path)
     _mcp_config_write(
         config_payload=_mcp_config_payload_get(
             config=config,
-            persistent_profile_path=runtime_context.persistent_profile_path,
+            persistent_profile_path=playwright_profile_state.profile_path,
             stealth_script_path=stealth_script_path,
             vpn_proxy_server=vpn_proxy_server,
         ),

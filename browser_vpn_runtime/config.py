@@ -1,9 +1,8 @@
 """Strict runtime configuration models."""
 
 import re
-from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 DEFAULT_BROWSER_LOCALE = "en-US"
 DEFAULT_BROWSER_TIMEZONE = "UTC"
@@ -57,16 +56,3 @@ class BrowserLocaleConfig(BaseModel):
         if re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", locale) is None:
             raise ValueError("locale must be a BCP 47-style language tag")
         return locale
-
-
-class BrowserRuntimeConfig(BaseModel):
-    """Validated browser and VPN runtime configuration."""
-
-    model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True, validate_default=True)
-
-    data_source_path: Path
-    locale_config: BrowserLocaleConfig = Field(default_factory=BrowserLocaleConfig)
-    persistent_profile_path: Path = Path("/runtime/playwright_profile")
-    timezone: str = DEFAULT_BROWSER_TIMEZONE
-    viewport_height: int = Field(default=1080, ge=1)
-    viewport_width: int = Field(default=1920, ge=1)
