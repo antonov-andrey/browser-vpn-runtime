@@ -1,6 +1,9 @@
 """Tests for Playwright MCP runtime launcher."""
 
+import asyncio
 import json
+import os
+import signal
 import socket
 from pathlib import Path
 
@@ -8,7 +11,11 @@ import pytest
 
 from browser_vpn_runtime.config import BrowserLocaleConfig
 from browser_vpn_runtime import playwright_mcp
-from browser_vpn_runtime.playwright_mcp import PlaywrightMcpConfig, _args_parse, playwright_mcp_command_argv_get
+from browser_vpn_runtime.playwright_mcp import (
+    PlaywrightMcpBackend,
+    PlaywrightMcpConfig,
+    playwright_mcp_command_argv_get,
+)
 
 
 class _ReadyProxyConnection:
@@ -23,6 +30,22 @@ class _ReadyProxyConnection:
         """Close one synthetic connection without suppressing exceptions."""
 
         return False
+
+
+class _FakeBackendProcess:
+    """Minimal subprocess lifecycle used to verify process-group ownership."""
+
+    def __init__(self) -> None:
+        """Create one running fake process."""
+
+        self.pid = 4321
+        self.returncode: int | None = None
+
+    async def wait(self) -> int:
+        """Mark the fake wrapper process exited."""
+
+        self.returncode = 0
+        return 0
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +139,76 @@ def test_playwright_mcp_command_uses_runtime_context(monkeypatch: pytest.MonkeyP
     assert output_dir.is_dir()
 
 
+def test_playwright_mcp_backend_starts_new_process_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Launch argv directly in one backend-owned process group."""
+
+    fake_process = _FakeBackendProcess()
+    captured_kwargs: dict[str, object] = {}
+
+    async def process_create(*command_argv: str, **kwargs: object) -> _FakeBackendProcess:
+        """Capture process creation without launching a child."""
+
+        assert command_argv == ("xvfb-run", "-a", "playwright-mcp")
+        captured_kwargs.update(kwargs)
+        return fake_process
+
+    async def ready_wait() -> None:
+        """Treat the fake process as ready."""
+
+    config = PlaywrightMcpConfig(
+        data_source_path=tmp_path / "data-source",
+        output_dir=tmp_path / ".playwright-mcp" / "target",
+        persistent_profile_path=tmp_path / "profile",
+        vpn_proxy_server="vpn-egress:1080",
+    )
+    backend = PlaywrightMcpBackend(config)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", process_create)
+    monkeypatch.setattr(
+        playwright_mcp, "playwright_mcp_command_argv_get", lambda config: ["xvfb-run", "-a", "playwright-mcp"]
+    )
+    monkeypatch.setattr(playwright_mcp.shutil, "which", lambda executable_name: f"/usr/bin/{executable_name}")
+    monkeypatch.setattr(backend, "_ready_wait", ready_wait)
+
+    asyncio.run(backend.start())
+
+    assert captured_kwargs["start_new_session"] is True
+
+
+def test_playwright_mcp_backend_stops_owned_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Signal the whole backend process group before profile filesystem work resumes."""
+
+    fake_process = _FakeBackendProcess()
+    signal_call_list: list[tuple[int, signal.Signals | int]] = []
+
+    def process_group_signal(process_group_id: int, signal_number: signal.Signals | int) -> None:
+        """Capture group signals and report absence after wrapper exit."""
+
+        signal_call_list.append((process_group_id, signal_number))
+        if signal_number == 0 and fake_process.returncode is not None:
+            raise ProcessLookupError
+
+    config = PlaywrightMcpConfig(
+        data_source_path=tmp_path / "data-source",
+        output_dir=tmp_path / ".playwright-mcp" / "target",
+        persistent_profile_path=tmp_path / "profile",
+        vpn_proxy_server="vpn-egress:1080",
+    )
+    backend = PlaywrightMcpBackend(config)
+    backend._process = fake_process
+    monkeypatch.setattr(os, "killpg", process_group_signal)
+
+    asyncio.run(backend.stop())
+
+    assert signal_call_list[0] == (fake_process.pid, signal.SIGTERM)
+    assert signal_call_list[-1] == (fake_process.pid, 0)
+
+
 def test_playwright_mcp_config_keeps_output_root_separate_from_runtime_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -182,29 +275,6 @@ def test_playwright_mcp_command_declares_allowed_hosts(monkeypatch: pytest.Monke
     )
 
 
-def test_playwright_mcp_cli_maps_allowed_hosts_to_config_field(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Parse allowed MCP hosts into the validated config field."""
-    argv = [
-        "browser-vpn-runtime-playwright-mcp",
-        "--allowed-hosts",
-        "localhost,127.0.0.1,openvpn",
-        "--data-source-path",
-        str(tmp_path / "data-source"),
-        "--vpn-proxy-server",
-        "vpn-egress:1080",
-    ]
-    monkeypatch.setattr("sys.argv", argv)
-
-    namespace = _args_parse()
-
-    assert namespace.allowed_host_list == ["localhost", "127.0.0.1", "openvpn"]
-    assert namespace.vpn_proxy_server == "vpn-egress:1080"
-    assert "allowed_hosts" not in vars(namespace)
-
-
 def test_playwright_mcp_command_uses_proxy_without_openvpn_data_source(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -230,6 +300,56 @@ def test_playwright_mcp_command_uses_proxy_without_openvpn_data_source(
 
     assert command_argv[:3] == ["xvfb-run", "-a", "playwright-mcp"]
     assert output_dir.is_dir()
+
+
+def test_playwright_mcp_isolated_backend_omits_persistent_profile_and_shared_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Generate the unprofiled backend with native MCP isolated-session mode."""
+
+    data_source_path = tmp_path / "data-source"
+    data_source_path.mkdir()
+    mcp_config_path = tmp_path / "runtime" / "unprofiled" / "config.json"
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, port, type: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.42.0.8", port))],
+    )
+    config = PlaywrightMcpConfig(
+        data_source_path=data_source_path,
+        isolated=True,
+        mcp_config_path=mcp_config_path,
+        output_dir=tmp_path / ".playwright-mcp" / "unprofiled",
+        persistent_profile_path=None,
+        vpn_proxy_server="vpn-egress:1080",
+    )
+
+    playwright_mcp_command_argv_get(config)
+
+    config_payload = json.loads(mcp_config_path.read_text(encoding="utf-8"))
+    assert config_payload["browser"]["isolated"] is True
+    assert "userDataDir" not in config_payload["browser"]
+    assert "sharedBrowserContext" not in config_payload
+    assert not (tmp_path / "runtime-profile").exists()
+
+
+def test_playwright_mcp_config_rejects_inconsistent_isolated_profile_combinations(tmp_path: Path) -> None:
+    """Validate the exact isolated-to-userDataDir relationship at construction."""
+
+    with pytest.raises(ValueError, match="isolated backend must omit persistent_profile_path"):
+        PlaywrightMcpConfig(
+            data_source_path=tmp_path / "data-source",
+            isolated=True,
+            persistent_profile_path=tmp_path / "profile",
+            vpn_proxy_server="vpn-egress:1080",
+        )
+    with pytest.raises(ValueError, match="named backend requires persistent_profile_path"):
+        PlaywrightMcpConfig(
+            data_source_path=tmp_path / "data-source",
+            persistent_profile_path=None,
+            vpn_proxy_server="vpn-egress:1080",
+        )
 
 
 def test_playwright_mcp_rejects_output_dir_outside_artifact_namespace(tmp_path: Path) -> None:

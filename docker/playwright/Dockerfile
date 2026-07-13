@@ -19,8 +19,8 @@ COPY browser_vpn_runtime ./browser_vpn_runtime
 RUN python -m pip install --root-user-action=ignore --no-cache-dir ".[browser]" \
     && groupadd --gid 1000 browser \
     && useradd --uid 1000 --gid browser --create-home --shell /usr/sbin/nologin browser \
-    && mkdir -p /output /runtime /runtime-profile \
-    && chown -R browser:browser /app /output /runtime /runtime-profile
+    && mkdir -p /output /runtime \
+    && chown -R browser:browser /app /output /runtime
 
 USER root
 

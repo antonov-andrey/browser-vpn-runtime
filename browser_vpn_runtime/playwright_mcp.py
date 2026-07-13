@@ -1,11 +1,12 @@
 """Playwright MCP server launcher for browser/VPN runtime."""
 
-import argparse
+import asyncio
 import ipaddress
 import json
 import os
 import re
 import shutil
+import signal
 import socket
 import time
 from pathlib import Path
@@ -15,7 +16,6 @@ from playwright_stealth import Stealth
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from browser_vpn_runtime.config import (
-    DEFAULT_BROWSER_LOCALE,
     DEFAULT_BROWSER_TIMEZONE,
     BrowserLocaleConfig,
 )
@@ -24,6 +24,7 @@ from browser_vpn_runtime.playwright_profile import playwright_profile_materializ
 DEFAULT_ACTION_TIMEOUT_MS = 30000
 DEFAULT_ALLOWED_HOST_LIST = ["localhost", "127.0.0.1"]
 DEFAULT_BROWSER_CHANNEL = "chrome"
+DEFAULT_BACKEND_STOP_TIMEOUT_SECONDS = 10
 DEFAULT_MCP_CONFIG_PATH = Path("/runtime/playwright_mcp/config.json")
 DEFAULT_MCP_EXECUTABLE_NAME = "playwright-mcp"
 DEFAULT_MCP_HOST = "127.0.0.1"
@@ -47,11 +48,12 @@ class PlaywrightMcpConfig(BaseModel):
     browser_channel: str = DEFAULT_BROWSER_CHANNEL
     data_source_path: Path
     host: str = DEFAULT_MCP_HOST
+    isolated: bool = False
     locale_config: BrowserLocaleConfig = Field(default_factory=BrowserLocaleConfig)
     mcp_config_path: Path = DEFAULT_MCP_CONFIG_PATH
     navigation_timeout_ms: int = Field(default=60000, ge=1)
     output_dir: Path = DEFAULT_OUTPUT_DIR
-    persistent_profile_path: Path = Path("/runtime/playwright_profile")
+    persistent_profile_path: Path | None = Path("/runtime/playwright_profile")
     port: int = Field(default=DEFAULT_PORT, ge=1, le=65535)
     timezone: str = DEFAULT_BROWSER_TIMEZONE
     viewport_height: int = Field(default=1080, ge=1)
@@ -60,71 +62,24 @@ class PlaywrightMcpConfig(BaseModel):
     vpn_proxy_server: str
 
     @model_validator(mode="after")
-    def _playwright_mcp_output_dir_validate(self) -> Self:
-        """Require a dedicated Playwright MCP artifact namespace.
+    def _playwright_mcp_launch_contract_validate(self) -> Self:
+        """Validate output ownership and isolated profile semantics.
 
         Returns:
             Validated configuration.
 
         Raises:
-            ValueError: If output_dir is not scoped under `.playwright-mcp`.
+            ValueError: If output_dir or the isolated profile combination is invalid.
         """
 
         if ".playwright-mcp" not in self.output_dir.parts:
             raise ValueError("output_dir must be scoped under a .playwright-mcp directory")
+        if self.isolated and self.persistent_profile_path is not None:
+            raise ValueError("isolated backend must omit persistent_profile_path")
+        if not self.isolated and self.persistent_profile_path is None:
+            raise ValueError("named backend requires persistent_profile_path")
         _vpn_proxy_endpoint_get(self.vpn_proxy_server)
         return self
-
-
-def _args_parse() -> argparse.Namespace:
-    """Parse Playwright MCP launcher CLI arguments.
-
-    Returns:
-        Parsed CLI namespace.
-    """
-
-    parser = argparse.ArgumentParser(description="Launch Playwright MCP through browser-vpn-runtime.")
-    parser.add_argument("--action-timeout-ms", default=DEFAULT_ACTION_TIMEOUT_MS, type=int)
-    parser.add_argument(
-        "--allowed-hosts",
-        default=DEFAULT_ALLOWED_HOST_LIST,
-        dest="allowed_host_list",
-        type=_allowed_host_list_parse,
-    )
-    parser.add_argument("--browser-channel", default=DEFAULT_BROWSER_CHANNEL)
-    parser.add_argument("--data-source-path", required=True, type=Path)
-    parser.add_argument("--host", default=DEFAULT_MCP_HOST)
-    parser.add_argument("--locale", default=DEFAULT_BROWSER_LOCALE)
-    parser.add_argument("--mcp-config-path", default=DEFAULT_MCP_CONFIG_PATH, type=Path)
-    parser.add_argument("--navigation-timeout-ms", default=60000, type=int)
-    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, type=Path)
-    parser.add_argument("--persistent-profile-path", default=Path("/runtime/playwright_profile"), type=Path)
-    parser.add_argument("--port", default=DEFAULT_PORT, type=int)
-    parser.add_argument("--proxy-ready-timeout-seconds", default=DEFAULT_PROXY_READY_TIMEOUT_SECONDS, type=int)
-    parser.add_argument("--timezone", default=DEFAULT_BROWSER_TIMEZONE)
-    parser.add_argument("--viewport-height", default=1080, type=int)
-    parser.add_argument("--viewport-width", default=1920, type=int)
-    parser.add_argument("--vpn-proxy-server", required=True)
-    return parser.parse_args()
-
-
-def _allowed_host_list_parse(value: str) -> list[str]:
-    """Parse a comma-separated Playwright MCP allowed-host list.
-
-    Args:
-        value: Comma-separated host list.
-
-    Returns:
-        Non-empty host list.
-
-    Raises:
-        argparse.ArgumentTypeError: If the list is empty.
-    """
-
-    allowed_host_list = [host.strip() for host in value.split(",") if host.strip()]
-    if not allowed_host_list:
-        raise argparse.ArgumentTypeError("allowed-hosts must contain at least one host")
-    return allowed_host_list
 
 
 def _allowed_host_list_with_port_get(*, allowed_host_list: list[str], port: int) -> list[str]:
@@ -172,7 +127,7 @@ def _launch_arg_list_get(*, viewport_height: int, viewport_width: int) -> list[s
 def _mcp_config_payload_get(
     *,
     config: PlaywrightMcpConfig,
-    persistent_profile_path: Path,
+    persistent_profile_path: Path | None,
     stealth_script_path: Path,
     vpn_proxy_server: str,
 ) -> dict[str, object]:
@@ -180,7 +135,7 @@ def _mcp_config_payload_get(
 
     Args:
         config: Validated launcher config.
-        persistent_profile_path: Pod-local persistent profile path.
+        persistent_profile_path: Pod-local persistent profile path, or `None` for isolated sessions.
         stealth_script_path: JavaScript init script path generated from stealth.
         vpn_proxy_server: Literal resolved SOCKS5 proxy server endpoint.
 
@@ -189,39 +144,41 @@ def _mcp_config_payload_get(
     """
 
     viewport_by_axis_map = {"height": config.viewport_height, "width": config.viewport_width}
-    return {
-        "browser": {
-            "browserName": "chromium",
-            "contextOptions": {
-                "deviceScaleFactor": 1,
-                "extraHTTPHeaders": {
-                    "Accept-Language": config.locale_config.accept_language,
-                },
-                "locale": config.locale_config.locale,
-                "screen": viewport_by_axis_map,
-                "timezoneId": config.timezone,
-                "viewport": viewport_by_axis_map,
+    browser_payload: dict[str, object] = {
+        "browserName": "chromium",
+        "contextOptions": {
+            "deviceScaleFactor": 1,
+            "extraHTTPHeaders": {
+                "Accept-Language": config.locale_config.accept_language,
             },
-            "initScript": [str(stealth_script_path)],
-            "launchOptions": {
-                "args": _launch_arg_list_get(
-                    viewport_height=config.viewport_height,
-                    viewport_width=config.viewport_width,
-                ),
-                "channel": config.browser_channel,
-                "chromiumSandbox": False,
-                "headless": False,
-                "proxy": {
-                    "bypass": "<-loopback>",
-                    "server": f"socks5://{vpn_proxy_server}",
-                },
-            },
-            "userDataDir": str(persistent_profile_path),
+            "locale": config.locale_config.locale,
+            "screen": viewport_by_axis_map,
+            "timezoneId": config.timezone,
+            "viewport": viewport_by_axis_map,
         },
+        "initScript": [str(stealth_script_path)],
+        "isolated": config.isolated,
+        "launchOptions": {
+            "args": _launch_arg_list_get(
+                viewport_height=config.viewport_height,
+                viewport_width=config.viewport_width,
+            ),
+            "channel": config.browser_channel,
+            "chromiumSandbox": False,
+            "headless": False,
+            "proxy": {
+                "bypass": "<-loopback>",
+                "server": f"socks5://{vpn_proxy_server}",
+            },
+        },
+    }
+    if persistent_profile_path is not None:
+        browser_payload["userDataDir"] = str(persistent_profile_path)
+    config_payload: dict[str, object] = {
+        "browser": browser_payload,
         "imageResponses": "allow",
         "outputDir": str(config.output_dir),
         "outputMode": "file",
-        "sharedBrowserContext": True,
         "snapshot": {
             "mode": "full",
         },
@@ -230,6 +187,9 @@ def _mcp_config_payload_get(
             "navigation": config.navigation_timeout_ms,
         },
     }
+    if not config.isolated:
+        config_payload["sharedBrowserContext"] = True
+    return config_payload
 
 
 def _mcp_config_write(*, config_payload: dict[str, object], config_path: Path) -> None:
@@ -432,24 +392,30 @@ def playwright_mcp_command_argv_get(config: PlaywrightMcpConfig) -> list[str]:
         PlaywrightMcpError: If the configured VPN proxy cannot be resolved or reached.
     """
 
-    playwright_profile_state = playwright_profile_materialize(
-        data_source_path=config.data_source_path,
-        target_profile_path=config.persistent_profile_path,
-    )
+    persistent_profile_path: Path | None = None
+    if not config.isolated:
+        if config.persistent_profile_path is None:
+            raise PlaywrightMcpError("named Playwright MCP backend requires persistent_profile_path")
+        playwright_profile_state = playwright_profile_materialize(
+            data_source_path=config.data_source_path,
+            target_profile_path=config.persistent_profile_path,
+        )
+        persistent_profile_path = playwright_profile_state.profile_path
     vpn_proxy_ip, vpn_proxy_port = _vpn_proxy_server_resolve(config.vpn_proxy_server)
     vpn_proxy_server = _vpn_proxy_server_literal_get(proxy_ip=vpn_proxy_ip, proxy_port=vpn_proxy_port)
     _vpn_proxy_wait(config=config, proxy_ip=vpn_proxy_ip, proxy_port=vpn_proxy_port)
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    _profile_language_preference_sync(
-        locale_config=config.locale_config,
-        profile_path=playwright_profile_state.profile_path,
-    )
+    if persistent_profile_path is not None:
+        _profile_language_preference_sync(
+            locale_config=config.locale_config,
+            profile_path=persistent_profile_path,
+        )
     stealth_script_path = config.mcp_config_path.with_suffix(".stealth.js")
     _stealth_script_write(locale_config=config.locale_config, stealth_script_path=stealth_script_path)
     _mcp_config_write(
         config_payload=_mcp_config_payload_get(
             config=config,
-            persistent_profile_path=playwright_profile_state.profile_path,
+            persistent_profile_path=persistent_profile_path,
             stealth_script_path=stealth_script_path,
             vpn_proxy_server=vpn_proxy_server,
         ),
@@ -458,23 +424,120 @@ def playwright_mcp_command_argv_get(config: PlaywrightMcpConfig) -> list[str]:
     return _xvfb_command_argv_get(config)
 
 
-def main() -> None:
-    """Replace the current process with the runtime-owned Playwright MCP server.
+class PlaywrightMcpBackend:
+    """Own one lazily started internal Playwright MCP server process."""
 
-    Raises:
-        PlaywrightMcpError: If required executables are missing.
-    """
+    def __init__(self, config: PlaywrightMcpConfig) -> None:
+        """Store the exact backend-local launch configuration.
 
-    config_payload = vars(_args_parse())
-    locale = config_payload.pop("locale")
-    config = PlaywrightMcpConfig(locale_config=BrowserLocaleConfig(locale=locale), **config_payload)
-    for executable_name in [XVFB_RUN_EXECUTABLE_NAME, DEFAULT_MCP_EXECUTABLE_NAME]:
-        if shutil.which(executable_name) is None:
-            raise PlaywrightMcpError(f"missing executable in PATH: {executable_name}")
-    command_argv = playwright_mcp_command_argv_get(config)
-    os.environ["TZ"] = config.timezone
-    os.execvp(command_argv[0], command_argv)
+        Args:
+            config: Backend-local Playwright MCP configuration.
+        """
 
+        self.config = config
+        self._process: asyncio.subprocess.Process | None = None
 
-if __name__ == "__main__":
-    main()
+    @property
+    def url(self) -> str:
+        """Return the internal backend base URL.
+
+        Returns:
+            Internal loopback URL.
+        """
+
+        if self._process is None or self._process.returncode is not None:
+            raise PlaywrightMcpError("Playwright MCP backend is not running")
+        return f"http://{self.config.host}:{self.config.port}"
+
+    async def start(self) -> None:
+        """Start the backend process and wait until its TCP listener is ready."""
+
+        if self._process is not None and self._process.returncode is None:
+            return
+        for executable_name in [XVFB_RUN_EXECUTABLE_NAME, DEFAULT_MCP_EXECUTABLE_NAME]:
+            if shutil.which(executable_name) is None:
+                raise PlaywrightMcpError(f"missing executable in PATH: {executable_name}")
+        command_argv = await asyncio.to_thread(playwright_mcp_command_argv_get, self.config)
+        environment = os.environ.copy()
+        environment["TZ"] = self.config.timezone
+        self._process = await asyncio.create_subprocess_exec(*command_argv, env=environment, start_new_session=True)
+        try:
+            await self._ready_wait()
+        except BaseException:
+            await self.stop()
+            raise
+
+    async def stop(self) -> None:
+        """Stop the backend and wait until the process has exited."""
+
+        process = self._process
+        if process is None:
+            return
+        self._process = None
+        process_group_id = process.pid
+        try:
+            os.killpg(process_group_id, signal.SIGTERM)
+        except ProcessLookupError:
+            if process.returncode is None:
+                await process.wait()
+            return
+        try:
+            await asyncio.wait_for(
+                self._process_group_exit_wait(process=process, process_group_id=process_group_id),
+                timeout=DEFAULT_BACKEND_STOP_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            try:
+                os.killpg(process_group_id, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            if process.returncode is None:
+                await process.wait()
+            await asyncio.wait_for(
+                self._process_group_absence_wait(process_group_id=process_group_id),
+                timeout=DEFAULT_BACKEND_STOP_TIMEOUT_SECONDS,
+            )
+
+    @staticmethod
+    async def _process_group_absence_wait(process_group_id: int) -> None:
+        """Wait until the operating system reports no process-group members."""
+
+        while True:
+            try:
+                os.killpg(process_group_id, 0)
+            except ProcessLookupError:
+                return
+            await asyncio.sleep(0.05)
+
+    async def _process_group_exit_wait(
+        self,
+        process: asyncio.subprocess.Process,
+        process_group_id: int,
+    ) -> None:
+        """Wait for the wrapper and every process in its owned group to exit."""
+
+        await process.wait()
+        await self._process_group_absence_wait(process_group_id=process_group_id)
+
+    async def _ready_wait(self) -> None:
+        """Wait for the backend TCP listener or fail when the process exits."""
+
+        if self._process is None:
+            raise PlaywrightMcpError("Playwright MCP backend process was not started")
+        deadline = asyncio.get_running_loop().time() + self.config.proxy_ready_timeout_seconds
+        while True:
+            if self._process.returncode is not None:
+                raise PlaywrightMcpError(
+                    f"Playwright MCP backend exited before readiness with code {self._process.returncode}"
+                )
+            try:
+                _reader, writer = await asyncio.open_connection(self.config.host, self.config.port)
+                writer.close()
+                await writer.wait_closed()
+                return
+            except OSError as exc:
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise PlaywrightMcpError(
+                        f"Playwright MCP backend did not listen on {self.config.host}:{self.config.port}"
+                    ) from exc
+                await asyncio.sleep(0.1)

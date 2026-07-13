@@ -1,1 +1,1 @@
-"""Reusable browser and VPN runtime boundary package."""
+"""Reusable browser profile-routing and VPN runtime boundary package."""

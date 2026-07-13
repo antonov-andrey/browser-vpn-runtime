@@ -54,15 +54,17 @@ def test_kubernetes_manifest_separates_gateway_and_browser_network_ownership() -
     assert all(volume["name"] != "tun-device" for volume in browser_pod_spec["volumes"])
     assert all(mount["mountPath"] != "/dev/net/tun" for mount in browser_container["volumeMounts"])
     assert browser_container["args"] == [
-        "browser-vpn-runtime-playwright-mcp",
+        "browser-vpn-runtime-playwright-mcp-router",
         "--data-source-path",
         "/input/.secret",
-        "--persistent-profile-path",
-        "/runtime-profile/playwright_profile",
-        "--output-dir",
-        "/output/.playwright-mcp/current",
-        "--mcp-config-path",
-        "/runtime/playwright_mcp/config.json",
+        "--profile-root-path",
+        "/runtime/mcp_playwright_profile/profile",
+        "--candidate-root-path",
+        "/runtime/mcp_playwright_profile/writeback_candidate",
+        "--output-root-path",
+        "/output/.playwright-mcp",
+        "--backend-runtime-root-path",
+        "/runtime/playwright_mcp_backend",
         "--host",
         "0.0.0.0",
         "--allowed-hosts",
@@ -118,4 +120,17 @@ def test_kubernetes_manifest_keeps_vpn_secret_and_tun_out_of_browser_pod() -> No
         "readOnly": True,
         "subPath": "playwright_profile",
     }
+    assert browser_mount_by_path_map["/runtime/mcp_playwright_profile"]["name"] == "profile-writeback"
+    assert browser_mount_by_path_map["/runtime/mcp_playwright_profile/profile"]["name"] == "profile-runtime"
     assert "/input/.secret" not in browser_mount_by_path_map
+
+
+def test_kubernetes_manifest_exposes_only_router_and_has_no_obsolete_writeback_job() -> None:
+    """Expose one public router port without recreating the deleted snapshot Job."""
+
+    resource_list = list(yaml.safe_load_all(Path("deploy/k8s/runtime-capability.yaml").read_text(encoding="utf-8")))
+    browser_deployment = _resource_by_kind_and_name_get(resource_list, "Deployment", "browser-mcp")
+    browser_container = browser_deployment["spec"]["template"]["spec"]["containers"][0]
+
+    assert browser_container["ports"] == [{"containerPort": 8931, "name": "mcp", "protocol": "TCP"}]
+    assert all(resource["kind"] != "Job" for resource in resource_list)

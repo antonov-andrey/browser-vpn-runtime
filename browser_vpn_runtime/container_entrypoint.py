@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import NoReturn
 
 CONTAINER_RUNTIME_USER_NAME = "browser"
-CONTAINER_WRITABLE_PATH_LIST = [Path("/output/.playwright-mcp"), Path("/runtime"), Path("/runtime-profile")]
+CONTAINER_WRITABLE_PATH_LIST = [Path("/output/.playwright-mcp"), Path("/runtime")]
 
 
 def container_command_exec(
