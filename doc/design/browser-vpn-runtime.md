@@ -54,8 +54,6 @@ The reference requires the source PVC to contain `playwright_profile/`; an empty
 
 `browser-mcp-egress-deny` permits only TCP `1080` to gateway pods and TCP/UDP `53` to kube-dns. The workflow executor remains in a separate pod or runtime and connects to the browser MCP Service. It does not join either network namespace and it does not receive OpenVPN credentials.
 
-The profile writeback Job stays independent of the long-running browser Deployment. The browser Deployment must be scaled to zero before the Job copies and atomically publishes the mutable profile state.
-
 ## Verification Contract
 
 Behavior tests cover strict OpenVPN input validation, generated gateway files and firewall policy, literal proxy configuration, launcher-owned SOCKS5 TCP reachability, and Kubernetes resource relationships. Platform TCP healthchecks own Playwright MCP service readiness; no separate always-successful readiness API or container default command exists. Container integration still requires a cluster or local container runtime with an actual `/dev/net/tun`, valid OpenVPN credentials, and a reachable VPN endpoint; unit tests cannot prove provider-side tunnel establishment or Internet egress.

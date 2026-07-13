@@ -80,8 +80,6 @@ The source PVC used by this reference must contain `playwright_profile/`; an emp
 
 Workflow execution remains external to both pods. It connects to `http://browser-mcp:8931/mcp` and must not launch `@playwright/mcp`, `npx`, or an independent browser stack.
 
-`deploy/k8s/profile-writeback-job.yaml` remains the explicit one-shot profile publication boundary. Scale `browser-mcp` to zero before unsuspending the Job, then let the platform synchronize the resulting writeback volume into its DataSource implementation.
-
 ## Development
 
 ```bash
