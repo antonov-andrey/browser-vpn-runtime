@@ -5,6 +5,7 @@ import ctypes
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,7 +23,7 @@ class PlaywrightProfileSnapshotConfig(BaseModel):
     owner_gid: int | None = Field(default=None, ge=0)
     owner_uid: int | None = Field(default=None, ge=0)
     runtime_profile_path: Path
-    writeback_root_path: Path
+    writeback_candidate_path: Path
 
 
 class PlaywrightProfileState(BaseModel):
@@ -45,7 +46,7 @@ def _args_parse() -> argparse.Namespace:
     parser.add_argument("--owner-gid", type=int)
     parser.add_argument("--owner-uid", type=int)
     parser.add_argument("--runtime-profile-path", required=True, type=Path)
-    parser.add_argument("--writeback-root-path", required=True, type=Path)
+    parser.add_argument("--writeback-candidate-path", required=True, type=Path)
     return parser.parse_args()
 
 
@@ -74,11 +75,12 @@ def _directory_tree_copy(source_path: Path, target_path: Path) -> list[Path]:
         Copied destination file paths in stable order.
     """
 
-    if not source_path.is_dir():
-        raise FileNotFoundError(f"profile directory is missing: {source_path}")
-    if target_path.exists():
-        shutil.rmtree(target_path)
-    shutil.copytree(source_path, target_path, ignore=shutil.ignore_patterns(*CHROMIUM_SINGLETON_NAME_LIST))
+    shutil.copytree(
+        source_path,
+        target_path,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns(*CHROMIUM_SINGLETON_NAME_LIST),
+    )
     return sorted(path for path in target_path.rglob("*") if path.is_file())
 
 
@@ -164,6 +166,51 @@ def _directory_tree_remove(path: Path) -> None:
     shutil.rmtree(path)
 
 
+def _playwright_profile_replace(
+    *,
+    source_profile_path: Path,
+    target_profile_path: Path,
+    owner_uid: int | None = None,
+    owner_gid: int | None = None,
+) -> PlaywrightProfileState:
+    """Prepare and atomically publish one exact profile directory.
+
+    Args:
+        source_profile_path: Existing profile directory to copy.
+        target_profile_path: Exact directory path to publish.
+        owner_uid: Target owner user id to set before publishing.
+        owner_gid: Target owner group id to set before publishing.
+
+    Returns:
+        Published profile state.
+
+    Raises:
+        FileNotFoundError: If the source profile directory is missing.
+    """
+
+    if not source_profile_path.is_dir():
+        raise FileNotFoundError(f"profile directory is missing: {source_profile_path}")
+    target_profile_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_profile_path = Path(
+        tempfile.mkdtemp(
+            dir=target_profile_path.parent,
+            prefix=f".{target_profile_path.name}.",
+            suffix=".tmp",
+        )
+    )
+    try:
+        _directory_tree_copy(source_profile_path, temp_profile_path)
+        _directory_tree_owner_set(temp_profile_path, owner_uid, owner_gid)
+        _directory_tree_atomic_replace(temp_profile_path, target_profile_path)
+    finally:
+        if temp_profile_path.exists():
+            _directory_tree_remove(temp_profile_path)
+    return PlaywrightProfileState(
+        file_path_list=sorted(path for path in target_profile_path.rglob("*") if path.is_file()),
+        profile_path=target_profile_path,
+    )
+
+
 def playwright_profile_materialize(data_source_path: Path, target_profile_path: Path) -> PlaywrightProfileState:
     """Materialize DataSource playwright_profile into a pod-local profile directory.
 
@@ -178,7 +225,10 @@ def playwright_profile_materialize(data_source_path: Path, target_profile_path: 
     if not target_profile_path.exists():
         source_profile_path = data_source_path / "playwright_profile"
         if source_profile_path.exists():
-            _directory_tree_copy(source_profile_path, target_profile_path)
+            return playwright_profile_replace(
+                source_profile_path=source_profile_path,
+                target_profile_path=target_profile_path,
+            )
         else:
             target_profile_path.mkdir(parents=True)
     for singleton_name in CHROMIUM_SINGLETON_NAME_LIST:
@@ -189,17 +239,42 @@ def playwright_profile_materialize(data_source_path: Path, target_profile_path: 
     )
 
 
+def playwright_profile_replace(
+    *,
+    source_profile_path: Path,
+    target_profile_path: Path,
+) -> PlaywrightProfileState:
+    """Atomically replace one exact profile directory from a source tree.
+
+    Args:
+        source_profile_path: Existing profile directory to copy.
+        target_profile_path: Exact directory path to publish.
+
+    Returns:
+        Published profile state.
+
+    Raises:
+        FileNotFoundError: If the source profile directory is missing.
+    """
+
+    return _playwright_profile_replace(
+        source_profile_path=source_profile_path,
+        target_profile_path=target_profile_path,
+    )
+
+
 def playwright_profile_snapshot(
+    *,
     runtime_profile_path: Path,
-    writeback_root_path: Path,
+    writeback_candidate_path: Path,
     owner_uid: int | None = None,
     owner_gid: int | None = None,
 ) -> PlaywrightProfileState:
-    """Publish a pod-local profile directory under one writable writeback root.
+    """Publish a pod-local profile at one caller-owned writeback candidate path.
 
     Args:
         runtime_profile_path: Runtime profile directory to snapshot.
-        writeback_root_path: Writable root that receives playwright_profile.
+        writeback_candidate_path: Exact writeback candidate directory to publish.
         owner_uid: Host owner user id to set before publishing.
         owner_gid: Host owner group id to set before publishing.
 
@@ -207,20 +282,12 @@ def playwright_profile_snapshot(
         Snapshotted profile state.
     """
 
-    target_profile_path = writeback_root_path / "playwright_profile"
-    temp_profile_path = writeback_root_path / ".playwright_profile.tmp"
-    writeback_root_path.mkdir(parents=True, exist_ok=True)
-    if temp_profile_path.exists():
-        shutil.rmtree(temp_profile_path)
-    try:
-        _directory_tree_copy(runtime_profile_path, temp_profile_path)
-        _directory_tree_owner_set(temp_profile_path, owner_uid, owner_gid)
-        _directory_tree_atomic_replace(temp_profile_path, target_profile_path)
-    finally:
-        if temp_profile_path.exists():
-            shutil.rmtree(temp_profile_path)
-    file_path_list = sorted(path for path in target_profile_path.rglob("*") if path.is_file())
-    return PlaywrightProfileState(file_path_list=file_path_list, profile_path=target_profile_path)
+    return _playwright_profile_replace(
+        source_profile_path=runtime_profile_path,
+        target_profile_path=writeback_candidate_path,
+        owner_uid=owner_uid,
+        owner_gid=owner_gid,
+    )
 
 
 def main() -> int:
@@ -235,7 +302,7 @@ def main() -> int:
         owner_gid=config.owner_gid,
         owner_uid=config.owner_uid,
         runtime_profile_path=config.runtime_profile_path,
-        writeback_root_path=config.writeback_root_path,
+        writeback_candidate_path=config.writeback_candidate_path,
     )
     print(state.model_dump_json(indent=2))
     return 0

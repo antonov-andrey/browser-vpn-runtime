@@ -1,14 +1,136 @@
 """Tests for Playwright profile materialization and snapshot helpers."""
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import shutil
 import sys
+import threading
 
 import pytest
 
 from browser_vpn_runtime import playwright_profile
-from browser_vpn_runtime.playwright_profile import playwright_profile_materialize, playwright_profile_snapshot
+from browser_vpn_runtime.playwright_profile import (
+    playwright_profile_materialize,
+    playwright_profile_replace,
+    playwright_profile_snapshot,
+)
+
+
+def test_playwright_profile_replace_atomically_replaces_target(tmp_path: Path) -> None:
+    """Replace an existing profile at its exact published directory path."""
+    source_profile_path = tmp_path / "source"
+    target_profile_path = tmp_path / "target"
+    (source_profile_path / "Default").mkdir(parents=True)
+    (source_profile_path / "Default" / "Cookies").write_text("new", encoding="utf-8")
+    target_profile_path.mkdir()
+    (target_profile_path / "stale").write_text("old", encoding="utf-8")
+
+    state = playwright_profile_replace(
+        source_profile_path=source_profile_path,
+        target_profile_path=target_profile_path,
+    )
+
+    assert state.profile_path == target_profile_path
+    assert (target_profile_path / "Default" / "Cookies").read_text(encoding="utf-8") == "new"
+    assert not (target_profile_path / "stale").exists()
+
+
+def test_playwright_profile_replace_fails_when_source_is_missing(tmp_path: Path) -> None:
+    """Reject replacement when the requested source profile does not exist."""
+    source_profile_path = tmp_path / "missing"
+    target_profile_path = tmp_path / "target"
+
+    with pytest.raises(FileNotFoundError, match=f"profile directory is missing: {source_profile_path}"):
+        playwright_profile_replace(
+            source_profile_path=source_profile_path,
+            target_profile_path=target_profile_path,
+        )
+
+    assert not target_profile_path.exists()
+
+
+def test_playwright_profile_replace_publishes_initial_target(tmp_path: Path) -> None:
+    """Publish the first profile at the exact requested target directory."""
+    source_profile_path = tmp_path / "source"
+    source_profile_path.mkdir()
+    (source_profile_path / "Preferences").write_text("new", encoding="utf-8")
+    target_profile_path = tmp_path / "target"
+
+    state = playwright_profile_replace(
+        source_profile_path=source_profile_path,
+        target_profile_path=target_profile_path,
+    )
+
+    assert state.file_path_list == [target_profile_path / "Preferences"]
+    assert state.profile_path == target_profile_path
+    assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "new"
+
+
+def test_playwright_profile_replace_excludes_chromium_singletons(tmp_path: Path) -> None:
+    """Exclude Chromium singleton markers from the published profile tree."""
+    source_profile_path = tmp_path / "source"
+    source_profile_path.mkdir()
+    (source_profile_path / "Preferences").write_text("new", encoding="utf-8")
+    for singleton_name in ["SingletonCookie", "SingletonLock", "SingletonSocket"]:
+        (source_profile_path / singleton_name).symlink_to("stale")
+    target_profile_path = tmp_path / "target"
+
+    state = playwright_profile_replace(
+        source_profile_path=source_profile_path,
+        target_profile_path=target_profile_path,
+    )
+
+    assert state.file_path_list == [target_profile_path / "Preferences"]
+    assert not any(
+        (target_profile_path / singleton_name).exists() or (target_profile_path / singleton_name).is_symlink()
+        for singleton_name in ["SingletonCookie", "SingletonLock", "SingletonSocket"]
+    )
+
+
+def test_playwright_profile_replace_uses_unique_sibling_temp_directories(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Keep simultaneous replacement staging directories distinct and target-adjacent."""
+    target_profile_path = tmp_path / "target"
+    target_profile_path.mkdir()
+    (target_profile_path / "Preferences").write_text("old", encoding="utf-8")
+    source_profile_path_list = [tmp_path / "source-a", tmp_path / "source-b"]
+    for index, source_profile_path in enumerate(source_profile_path_list):
+        source_profile_path.mkdir()
+        (source_profile_path / "Preferences").write_text(f"new-{index}", encoding="utf-8")
+    barrier = threading.Barrier(2)
+    staged_profile_path_list: list[Path] = []
+    real_directory_tree_atomic_replace = playwright_profile._directory_tree_atomic_replace
+
+    def synchronized_directory_tree_atomic_replace(source_path: Path, target_path: Path) -> None:
+        """Hold both prepared trees before allowing either publication."""
+        staged_profile_path_list.append(source_path)
+        assert source_path.parent == target_path.parent
+        barrier.wait(timeout=5)
+        real_directory_tree_atomic_replace(source_path, target_path)
+
+    monkeypatch.setattr(
+        playwright_profile,
+        "_directory_tree_atomic_replace",
+        synchronized_directory_tree_atomic_replace,
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        state_list = list(
+            executor.map(
+                lambda source_profile_path: playwright_profile_replace(
+                    source_profile_path=source_profile_path,
+                    target_profile_path=target_profile_path,
+                ),
+                source_profile_path_list,
+            )
+        )
+
+    assert len(set(staged_profile_path_list)) == 2
+    assert [state.profile_path for state in state_list] == [target_profile_path, target_profile_path]
+    assert (target_profile_path / "Preferences").read_text(encoding="utf-8") in {"new-0", "new-1"}
 
 
 def test_playwright_profile_materialize_copies_directory_tree(tmp_path: Path) -> None:
@@ -94,18 +216,21 @@ def test_playwright_profile_materialize_removes_singletons_copied_from_source(tm
     )
 
 
-def test_playwright_profile_snapshot_copies_runtime_tree_back_to_data_source(tmp_path: Path) -> None:
-    """Snapshot a runtime profile directory tree back under playwright_profile."""
+def test_playwright_profile_snapshot_replaces_caller_writeback_candidate(tmp_path: Path) -> None:
+    """Snapshot a runtime profile directly to the caller-provided candidate path."""
     runtime_profile_path = tmp_path / "runtime-profile"
     runtime_profile_path.mkdir()
     (runtime_profile_path / "Default").mkdir()
     (runtime_profile_path / "Default" / "Local Storage").write_text("storage", encoding="utf-8")
-    data_source_path = tmp_path / "data-source"
+    writeback_candidate_path = tmp_path / "runtime" / "mcp_playwright_profile" / "writeback_candidate"
 
-    state = playwright_profile_snapshot(runtime_profile_path, data_source_path)
+    state = playwright_profile_snapshot(
+        runtime_profile_path=runtime_profile_path,
+        writeback_candidate_path=writeback_candidate_path,
+    )
 
-    snapshot_file_path = data_source_path / "playwright_profile" / "Default" / "Local Storage"
-    assert state.profile_path == data_source_path / "playwright_profile"
+    snapshot_file_path = writeback_candidate_path / "Default" / "Local Storage"
+    assert state.profile_path == writeback_candidate_path
     assert state.file_path_list == [snapshot_file_path]
     assert snapshot_file_path.read_text(encoding="utf-8") == "storage"
 
@@ -118,8 +243,7 @@ def test_playwright_profile_snapshot_exchanges_before_cleanup_and_parent_fsync(
     runtime_profile_path = tmp_path / "runtime-profile"
     runtime_profile_path.mkdir()
     (runtime_profile_path / "Preferences").write_text("runtime", encoding="utf-8")
-    data_source_path = tmp_path / "data-source"
-    target_profile_path = data_source_path / "playwright_profile"
+    target_profile_path = tmp_path / "writeback-candidate"
     target_profile_path.mkdir(parents=True)
     (target_profile_path / "Preferences").write_text("previous", encoding="utf-8")
     event_list: list[str] = []
@@ -152,19 +276,24 @@ def test_playwright_profile_snapshot_exchanges_before_cleanup_and_parent_fsync(
     def fake_directory_fsync(path: Path) -> None:
         """Record parent fsync after the exchanged old tree is removed."""
         event_list.append("fsync")
-        assert path == data_source_path
+        assert path == tmp_path
         assert target_profile_path.is_dir()
-        assert not (data_source_path / ".playwright_profile.tmp").exists()
+        assert not any(path.name.startswith(".writeback-candidate.") for path in tmp_path.iterdir())
 
     monkeypatch.setattr(playwright_profile, "_directory_tree_owner_set", fake_directory_tree_owner_set)
     monkeypatch.setattr(playwright_profile, "_directory_tree_exchange", fake_directory_tree_exchange)
     monkeypatch.setattr(playwright_profile, "_directory_tree_remove", fake_directory_tree_remove)
     monkeypatch.setattr(playwright_profile, "_directory_fsync", fake_directory_fsync)
 
-    state = playwright_profile_snapshot(runtime_profile_path, data_source_path, owner_uid=1000, owner_gid=1000)
+    state = playwright_profile_snapshot(
+        runtime_profile_path=runtime_profile_path,
+        writeback_candidate_path=target_profile_path,
+        owner_uid=1000,
+        owner_gid=1000,
+    )
 
     assert event_list == ["owner", "exchange", "remove", "fsync"]
-    assert state.profile_path == data_source_path / "playwright_profile"
+    assert state.profile_path == target_profile_path
     assert (state.profile_path / "owner.marker").read_text(encoding="utf-8") == "owned"
 
 
@@ -176,8 +305,7 @@ def test_playwright_profile_snapshot_preserves_existing_target_when_exchange_fai
     runtime_profile_path = tmp_path / "runtime-profile"
     runtime_profile_path.mkdir()
     (runtime_profile_path / "Preferences").write_text("runtime", encoding="utf-8")
-    data_source_path = tmp_path / "data-source"
-    target_profile_path = data_source_path / "playwright_profile"
+    target_profile_path = tmp_path / "writeback-candidate"
     target_profile_path.mkdir(parents=True)
     (target_profile_path / "Preferences").write_text("previous", encoding="utf-8")
 
@@ -190,11 +318,14 @@ def test_playwright_profile_snapshot_preserves_existing_target_when_exchange_fai
     monkeypatch.setattr(playwright_profile, "_directory_tree_exchange", fake_directory_tree_exchange)
 
     with pytest.raises(OSError, match="exchange failed"):
-        playwright_profile_snapshot(runtime_profile_path, data_source_path)
+        playwright_profile_snapshot(
+            runtime_profile_path=runtime_profile_path,
+            writeback_candidate_path=target_profile_path,
+        )
 
     assert target_profile_path.is_dir()
     assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "previous"
-    assert not (data_source_path / ".playwright_profile.tmp").exists()
+    assert not any(path.name.startswith(".writeback-candidate.") for path in tmp_path.iterdir())
 
 
 def test_playwright_profile_snapshot_keeps_new_target_when_old_tree_cleanup_fails(
@@ -205,8 +336,7 @@ def test_playwright_profile_snapshot_keeps_new_target_when_old_tree_cleanup_fail
     runtime_profile_path = tmp_path / "runtime-profile"
     runtime_profile_path.mkdir()
     (runtime_profile_path / "Preferences").write_text("runtime", encoding="utf-8")
-    data_source_path = tmp_path / "data-source"
-    target_profile_path = data_source_path / "playwright_profile"
+    target_profile_path = tmp_path / "writeback-candidate"
     target_profile_path.mkdir(parents=True)
     (target_profile_path / "Preferences").write_text("previous", encoding="utf-8")
     fsync_path_list: list[Path] = []
@@ -221,9 +351,12 @@ def test_playwright_profile_snapshot_keeps_new_target_when_old_tree_cleanup_fail
     monkeypatch.setattr(playwright_profile, "_directory_fsync", fsync_path_list.append)
 
     with pytest.raises(OSError, match="cleanup failed"):
-        playwright_profile_snapshot(runtime_profile_path, data_source_path)
+        playwright_profile_snapshot(
+            runtime_profile_path=runtime_profile_path,
+            writeback_candidate_path=target_profile_path,
+        )
 
-    assert fsync_path_list == [data_source_path]
+    assert fsync_path_list == [tmp_path]
     assert target_profile_path.is_dir()
     assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
 
@@ -236,7 +369,7 @@ def test_playwright_profile_snapshot_uses_replace_when_target_is_absent(
     runtime_profile_path = tmp_path / "runtime-profile"
     runtime_profile_path.mkdir()
     (runtime_profile_path / "Preferences").write_text("runtime", encoding="utf-8")
-    data_source_path = tmp_path / "data-source"
+    target_profile_path = tmp_path / "writeback-candidate"
     event_list: list[str] = []
     real_replace = playwright_profile.os.replace
 
@@ -253,7 +386,10 @@ def test_playwright_profile_snapshot_uses_replace_when_target_is_absent(
     monkeypatch.setattr(playwright_profile, "_directory_tree_exchange", fail_directory_tree_exchange)
     monkeypatch.setattr(playwright_profile, "_directory_fsync", lambda path: event_list.append("fsync"))
 
-    state = playwright_profile_snapshot(runtime_profile_path, data_source_path)
+    state = playwright_profile_snapshot(
+        runtime_profile_path=runtime_profile_path,
+        writeback_candidate_path=target_profile_path,
+    )
 
     assert event_list == ["replace", "fsync"]
     assert (state.profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
@@ -271,7 +407,7 @@ def test_playwright_profile_existing_target_requires_linux(monkeypatch: pytest.M
         playwright_profile._directory_tree_atomic_replace(source_path, target_path)
 
 
-def test_playwright_profile_snapshot_cli_publishes_generic_writeback(
+def test_playwright_profile_snapshot_cli_publishes_writeback_candidate(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
@@ -280,7 +416,7 @@ def test_playwright_profile_snapshot_cli_publishes_generic_writeback(
     runtime_profile_path = tmp_path / "runtime-profile"
     runtime_profile_path.mkdir()
     (runtime_profile_path / "Preferences").write_text("runtime", encoding="utf-8")
-    writeback_root_path = tmp_path / "writeback"
+    writeback_candidate_path = tmp_path / "writeback-candidate"
     monkeypatch.setattr(
         sys,
         "argv",
@@ -288,8 +424,8 @@ def test_playwright_profile_snapshot_cli_publishes_generic_writeback(
             "browser-vpn-runtime-playwright-profile-snapshot",
             "--runtime-profile-path",
             str(runtime_profile_path),
-            "--writeback-root-path",
-            str(writeback_root_path),
+            "--writeback-candidate-path",
+            str(writeback_candidate_path),
         ],
     )
 
@@ -297,5 +433,5 @@ def test_playwright_profile_snapshot_cli_publishes_generic_writeback(
 
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 0
-    assert payload["profile_path"] == str(writeback_root_path / "playwright_profile")
-    assert (writeback_root_path / "playwright_profile" / "Preferences").read_text(encoding="utf-8") == "runtime"
+    assert payload["profile_path"] == str(writeback_candidate_path)
+    assert (writeback_candidate_path / "Preferences").read_text(encoding="utf-8") == "runtime"
