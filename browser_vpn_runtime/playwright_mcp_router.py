@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import json
 import re
 import socket
@@ -11,7 +12,7 @@ from itertools import combinations
 from pathlib import Path
 from typing import Protocol, Self
 
-from aiohttp import ClientResponse, ClientSession, ClientTimeout, web
+from aiohttp import ClientConnectionResetError, ClientResponse, ClientSession, ClientTimeout, web
 from multidict import CIMultiDict, MultiDict, MultiMapping
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -242,14 +243,20 @@ class McpPlaywrightProfileRouter:
         response = web.StreamResponse(
             status=upstream_response.status, reason=upstream_response.reason, headers=response_headers
         )
-        await response.prepare(request)
         try:
+            await response.prepare(request)
             async for chunk in upstream_response.content.iter_chunked(64 * 1024):
-                await response.write(chunk)
+                try:
+                    await response.write(chunk)
+                except ClientConnectionResetError:
+                    return response
+            try:
+                await response.write_eof()
+            except ClientConnectionResetError:
+                return response
+            return response
         finally:
             upstream_response.release()
-        await response.write_eof()
-        return response
 
     async def _backend_get_start(self, physical_profile: str | None) -> PlaywrightMcpBackendProtocol:
         """Create one backend lifecycle owner when absent and ensure it is running."""
@@ -321,6 +328,17 @@ class McpPlaywrightProfileRouter:
             playwright_profile_snapshot,
             runtime_profile_path=self.config.profile_root_path / physical_profile,
             writeback_candidate_path=self.config.candidate_root_path,
+        )
+        print(
+            json.dumps(
+                {
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "event_name": "browser_vpn_runtime.playwright_mcp_router.writeback_candidate_publication_completed",
+                    "physical_profile": physical_profile,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
         )
 
     def _profile_lock_get(self, physical_profile: str) -> asyncio.Lock:

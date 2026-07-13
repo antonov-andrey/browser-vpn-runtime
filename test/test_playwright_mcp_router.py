@@ -1,11 +1,14 @@
 """Behavior tests for the run-local Playwright MCP profile router."""
 
 import asyncio
+import builtins
 from collections.abc import Callable
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 
 import pytest
-from aiohttp import ClientSession, web
+from aiohttp import ClientConnectionResetError, ClientSession, web
 from aiohttp.test_utils import TestClient, TestServer
 from pydantic import ValidationError
 
@@ -403,6 +406,55 @@ def test_candidate_endpoint_stops_backend_and_atomically_replaces_candidate(
     _router_test(run, tmp_path)
 
 
+def test_candidate_endpoint_logs_completion_after_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Emit the structured publication event only after the snapshot completes."""
+
+    async def run(fixture: RouterFixture) -> None:
+        from browser_vpn_runtime import playwright_mcp_router
+
+        event_list: list[str] = []
+        payload_list: list[dict[str, str]] = []
+        profile_snapshot = playwright_mcp_router.playwright_profile_snapshot
+
+        def snapshot_record(**kwargs: Path) -> object:
+            """Record completed snapshot work before returning to the router."""
+
+            state = profile_snapshot(**kwargs)
+            event_list.append("snapshot:completed")
+            return state
+
+        def log_record(message: str, *, flush: bool) -> None:
+            """Record the structured router event and its ordering."""
+
+            assert flush
+            event_list.append("event:logged")
+            payload_list.append(json.loads(message))
+
+        monkeypatch.setattr(playwright_mcp_router, "playwright_profile_snapshot", snapshot_record)
+        monkeypatch.setattr(builtins, "print", log_record)
+        await fixture.client.post("/mcp?profile=target")
+
+        response = await fixture.client.post(
+            "/runtime/mcp-playwright-profile/writeback-candidate?profile=target",
+            data=b"",
+        )
+
+        assert response.status == 204
+        assert event_list == ["snapshot:completed", "event:logged"]
+        assert len(payload_list) == 1
+        assert (
+            payload_list[0]["event_name"]
+            == "browser_vpn_runtime.playwright_mcp_router.writeback_candidate_publication_completed"
+        )
+        assert payload_list[0]["physical_profile"] == "target"
+        assert datetime.fromisoformat(payload_list[0]["completed_at"]).utcoffset() == timezone.utc.utcoffset(None)
+
+    _router_test(run, tmp_path)
+
+
 def test_candidate_endpoint_replaces_one_shared_candidate_with_latest_profile(tmp_path: Path) -> None:
     """Publish every selected profile into the same last-completion-wins directory."""
 
@@ -531,6 +583,71 @@ def test_proxy_preserves_status_body_streaming_headers_and_non_router_query(tmp_
         identity_payload = await identity_response.json()
         assert identity_payload["body"] == "payload"
         assert identity_payload["query"] == [["cursor", "next"]]
+
+    _router_test(run, tmp_path)
+
+
+def test_proxy_releases_upstream_when_downstream_disconnects_during_streaming(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Treat a downstream reset during response writes as normal proxy completion."""
+
+    class DisconnectingStreamResponse:
+        """Simulate a prepared downstream response whose transport closes on write."""
+
+        def __init__(self, **kwargs: object) -> None:
+            """Accept the aiohttp response constructor contract."""
+
+        async def prepare(self, request: web.Request) -> None:
+            """Prepare the simulated downstream response."""
+
+        async def write(self, chunk: bytes) -> None:
+            """Raise the exact aiohttp downstream disconnect condition."""
+
+            raise ClientConnectionResetError("Cannot write to closing transport")
+
+        async def write_eof(self) -> None:
+            """Fail if finalization is attempted after the disconnected write."""
+
+            raise AssertionError("write_eof must not run after a downstream reset")
+
+    class UpstreamContent:
+        """Yield one deterministic upstream response chunk."""
+
+        async def iter_chunked(self, size: int) -> object:
+            """Yield one chunk through the upstream streaming contract."""
+
+            yield b"event: message\n\n"
+
+    class UpstreamResponse:
+        """Expose the upstream response surface used by the proxy."""
+
+        def __init__(self) -> None:
+            """Initialize one unreleased upstream response."""
+
+            self.content = UpstreamContent()
+            self.headers: dict[str, str] = {}
+            self.reason = "OK"
+            self.released = False
+            self.status = 200
+
+        def release(self) -> None:
+            """Record release of the upstream connection."""
+
+            self.released = True
+
+    monkeypatch.setattr(web, "StreamResponse", DisconnectingStreamResponse)
+
+    async def run(fixture: RouterFixture) -> None:
+        upstream_response = UpstreamResponse()
+
+        await fixture.router._backend_response_proxy(
+            request=object(),
+            upstream_response=upstream_response,
+        )
+
+        assert upstream_response.released
 
     _router_test(run, tmp_path)
 

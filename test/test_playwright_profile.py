@@ -171,6 +171,46 @@ def test_playwright_profile_materialize_makes_immutable_source_tree_writable(tmp
     assert not source_profile_path.stat().st_mode & stat.S_IWUSR
 
 
+def test_playwright_profile_materialize_stages_writable_tree_before_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Make the staged runtime tree writable before publishing its directory name."""
+
+    source_profile_path = tmp_path / "data-source" / "playwright_profile"
+    source_default_path = source_profile_path / "Default"
+    source_default_path.mkdir(parents=True)
+    source_preferences_path = source_default_path / "Preferences"
+    source_preferences_path.write_text("{}", encoding="utf-8")
+    source_preferences_path.chmod(0o444)
+    source_default_path.chmod(0o555)
+    source_profile_path.chmod(0o555)
+    target_profile_path = tmp_path / "runtime-profile"
+    real_directory_tree_atomic_replace = playwright_profile._directory_tree_atomic_replace
+
+    def writable_directory_tree_atomic_replace(source_path: Path, target_path: Path) -> None:
+        """Observe writable staged modes immediately before atomic publication."""
+
+        assert source_path.stat().st_mode & stat.S_IWUSR
+        assert (source_path / "Default").stat().st_mode & stat.S_IWUSR
+        assert (source_path / "Default" / "Preferences").stat().st_mode & stat.S_IWUSR
+        assert not source_profile_path.stat().st_mode & stat.S_IWUSR
+        assert not source_default_path.stat().st_mode & stat.S_IWUSR
+        assert not source_preferences_path.stat().st_mode & stat.S_IWUSR
+        real_directory_tree_atomic_replace(source_path, target_path)
+
+    monkeypatch.setattr(
+        playwright_profile,
+        "_directory_tree_atomic_replace",
+        writable_directory_tree_atomic_replace,
+    )
+
+    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+
+    assert target_profile_path.stat().st_mode & stat.S_IWUSR
+    assert not source_profile_path.stat().st_mode & stat.S_IWUSR
+
+
 def test_playwright_profile_materialize_creates_empty_profile_when_source_is_absent(tmp_path: Path) -> None:
     """Materialize an empty pod-local profile when DataSource has no playwright_profile prefix."""
     target_profile_path = tmp_path / "runtime-profile"
@@ -214,6 +254,22 @@ def test_playwright_profile_materialize_removes_stale_chromium_singletons(tmp_pa
         (target_profile_path / singleton_name).exists() or (target_profile_path / singleton_name).is_symlink()
         for singleton_name in ["SingletonCookie", "SingletonLock", "SingletonSocket"]
     )
+
+
+def test_playwright_profile_materialize_excludes_removed_regular_singleton_from_state(tmp_path: Path) -> None:
+    """Return only files that remain after regular singleton cleanup."""
+
+    target_profile_path = tmp_path / "runtime-profile"
+    target_profile_path.mkdir()
+    preferences_path = target_profile_path / "Preferences"
+    preferences_path.write_text("runtime", encoding="utf-8")
+    singleton_path = target_profile_path / "SingletonLock"
+    singleton_path.write_text("stale", encoding="utf-8")
+
+    state = playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+
+    assert state.file_path_list == [preferences_path]
+    assert not singleton_path.exists()
 
 
 def test_playwright_profile_materialize_removes_singletons_copied_from_source(tmp_path: Path) -> None:

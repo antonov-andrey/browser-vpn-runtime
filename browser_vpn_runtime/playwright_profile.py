@@ -185,6 +185,7 @@ def _playwright_profile_replace(
     target_profile_path: Path,
     owner_uid: int | None = None,
     owner_gid: int | None = None,
+    write_enable: bool = False,
 ) -> PlaywrightProfileState:
     """Prepare and atomically publish one exact profile directory.
 
@@ -193,6 +194,7 @@ def _playwright_profile_replace(
         target_profile_path: Exact directory path to publish.
         owner_uid: Target owner user id to set before publishing.
         owner_gid: Target owner group id to set before publishing.
+        write_enable: Whether to make the staged tree owner-writable.
 
     Returns:
         Published profile state.
@@ -214,6 +216,8 @@ def _playwright_profile_replace(
     try:
         _directory_tree_copy(source_profile_path, temp_profile_path)
         _directory_tree_owner_set(temp_profile_path, owner_uid, owner_gid)
+        if write_enable:
+            _directory_tree_write_enable(temp_profile_path)
         _directory_tree_atomic_replace(temp_profile_path, target_profile_path)
     finally:
         if temp_profile_path.exists():
@@ -254,7 +258,7 @@ def playwright_profile_materialize(data_source_path: Path, target_profile_path: 
         (target_profile_path / singleton_name).unlink(missing_ok=True)
     _directory_tree_write_enable(target_profile_path)
     return PlaywrightProfileState(
-        file_path_list=state.file_path_list,
+        file_path_list=sorted(path for path in target_profile_path.rglob("*") if path.is_file()),
         profile_path=state.profile_path,
     )
 
@@ -280,8 +284,8 @@ def playwright_profile_replace(
     state = _playwright_profile_replace(
         source_profile_path=source_profile_path,
         target_profile_path=target_profile_path,
+        write_enable=True,
     )
-    _directory_tree_write_enable(target_profile_path)
     return state
 
 
