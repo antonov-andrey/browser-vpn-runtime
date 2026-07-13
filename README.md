@@ -56,7 +56,7 @@ SOCKS5 target hostname resolution stays at the gateway side. The Playwright MCP 
 
 The Playwright image entrypoint prepares only its fixed writable roots, including `/output/.playwright-mcp`, before browser startup. Under ordinary Docker bind mounts it starts with root privileges solely to create and assign those roots, then replaces itself with the requested command as the unprivileged `browser` user. When an orchestrator already starts the image as that browser UID, as in the Kubernetes reference, it creates accessible roots without changing ownership or identity. Browser and MCP processes never run as root.
 
-An already active target connection can still fail while OpenVPN reconnects. In that case the workflow runtime keeps the error in its browser result, waits for gateway recovery, calls the standard Playwright MCP `browser_close` tool, and reopens the same target. `browser_close` disposes the current browser backend while the MCP server stays available; the next browser tool starts a fresh Chromium network context without restarting the workflow step.
+An already active target connection can still fail while OpenVPN reconnects. In that case the workflow runtime keeps the error in its browser result, waits for gateway recovery, calls the standard Playwright MCP `browser_close` tool, and reopens the same target. `browser_close` disposes the current browser backend while the MCP server stays available; the next browser tool starts a fresh Chromium network context without restarting the workflow step. The configured MCP server exposes one shared browser context, so callers must not operate that endpoint concurrently; the workflow runtime serializes concurrent invocations by MCP URL.
 
 ```bash
 browser-vpn-runtime-playwright-mcp \
