@@ -2,7 +2,7 @@
 
 import asyncio
 import builtins
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -647,6 +647,106 @@ def test_proxy_releases_upstream_when_downstream_disconnects_during_streaming(
             upstream_response=upstream_response,
         )
 
+        assert upstream_response.released
+
+    _router_test(run, tmp_path)
+
+
+def test_proxy_releases_upstream_when_downstream_disconnects_during_finalization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Treat a downstream reset from write_eof as normal proxy completion.
+
+    Args:
+        monkeypatch: Pytest attribute patch helper.
+        tmp_path: Temporary router runtime root.
+    """
+
+    class FinalizingStreamResponse:
+        """Simulate successful writes followed by a closing transport at finalization."""
+
+        def __init__(self, **kwargs: object) -> None:
+            """Accept the aiohttp response constructor contract.
+
+            Args:
+                kwargs: Aiohttp response options ignored by the fake.
+            """
+
+            self.chunk_list: list[bytes] = []
+            self.write_eof_called = False
+
+        async def prepare(self, request: web.Request) -> None:
+            """Prepare the simulated downstream response.
+
+            Args:
+                request: Downstream request ignored by the fake.
+            """
+
+        async def write(self, chunk: bytes) -> None:
+            """Record one successfully proxied response chunk.
+
+            Args:
+                chunk: Proxied response bytes.
+            """
+
+            self.chunk_list.append(chunk)
+
+        async def write_eof(self) -> None:
+            """Raise the exact aiohttp finalization disconnect condition."""
+
+            self.write_eof_called = True
+            raise ClientConnectionResetError("Cannot write to closing transport")
+
+    class UpstreamContent:
+        """Yield one deterministic upstream response chunk."""
+
+        async def iter_chunked(self, size: int) -> AsyncIterator[bytes]:
+            """Yield one chunk through the upstream streaming contract.
+
+            Args:
+                size: Requested maximum chunk size.
+
+            Returns:
+                Asynchronous iterator yielding one deterministic response chunk.
+            """
+
+            yield b"event: message\n\n"
+
+    class UpstreamResponse:
+        """Expose the upstream response surface used by the proxy."""
+
+        def __init__(self) -> None:
+            """Initialize one unreleased upstream response."""
+
+            self.content = UpstreamContent()
+            self.headers: dict[str, str] = {}
+            self.reason = "OK"
+            self.released = False
+            self.status = 200
+
+        def release(self) -> None:
+            """Record release of the upstream connection."""
+
+            self.released = True
+
+    monkeypatch.setattr(web, "StreamResponse", FinalizingStreamResponse)
+
+    async def run(fixture: RouterFixture) -> None:
+        """Exercise proxy finalization through the shared router fixture.
+
+        Args:
+            fixture: Initialized router fixture.
+        """
+
+        upstream_response = UpstreamResponse()
+        response = await fixture.router._backend_response_proxy(
+            request=object(),
+            upstream_response=upstream_response,
+        )
+
+        assert response.chunk_list == [b"event: message\n\n"]
+        assert response.write_eof_called
         assert upstream_response.released
 
     _router_test(run, tmp_path)
