@@ -166,6 +166,19 @@ def _directory_tree_remove(path: Path) -> None:
     shutil.rmtree(path)
 
 
+def _directory_tree_write_enable(path: Path) -> None:
+    """Enable owner writes on one runtime profile tree.
+
+    Args:
+        path: Runtime profile root copied from an immutable source.
+    """
+
+    path.chmod(path.stat().st_mode | 0o700)
+    for child_path in path.rglob("*"):
+        owner_mode = 0o700 if child_path.is_dir() else 0o600
+        child_path.chmod(child_path.stat().st_mode | owner_mode)
+
+
 def _playwright_profile_replace(
     *,
     source_profile_path: Path,
@@ -225,17 +238,24 @@ def playwright_profile_materialize(data_source_path: Path, target_profile_path: 
     if not target_profile_path.exists():
         source_profile_path = data_source_path / "playwright_profile"
         if source_profile_path.exists():
-            return playwright_profile_replace(
+            state = playwright_profile_replace(
                 source_profile_path=source_profile_path,
                 target_profile_path=target_profile_path,
             )
         else:
             target_profile_path.mkdir(parents=True)
+            state = PlaywrightProfileState(file_path_list=[], profile_path=target_profile_path)
+    else:
+        state = PlaywrightProfileState(
+            file_path_list=sorted(path for path in target_profile_path.rglob("*") if path.is_file()),
+            profile_path=target_profile_path,
+        )
     for singleton_name in CHROMIUM_SINGLETON_NAME_LIST:
         (target_profile_path / singleton_name).unlink(missing_ok=True)
+    _directory_tree_write_enable(target_profile_path)
     return PlaywrightProfileState(
-        file_path_list=sorted(path for path in target_profile_path.rglob("*") if path.is_file()),
-        profile_path=target_profile_path,
+        file_path_list=state.file_path_list,
+        profile_path=state.profile_path,
     )
 
 
@@ -257,10 +277,12 @@ def playwright_profile_replace(
         FileNotFoundError: If the source profile directory is missing.
     """
 
-    return _playwright_profile_replace(
+    state = _playwright_profile_replace(
         source_profile_path=source_profile_path,
         target_profile_path=target_profile_path,
     )
+    _directory_tree_write_enable(target_profile_path)
+    return state
 
 
 def playwright_profile_snapshot(

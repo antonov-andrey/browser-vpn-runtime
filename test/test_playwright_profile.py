@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import shutil
+import stat
 import sys
 import threading
 
@@ -150,6 +151,24 @@ def test_playwright_profile_materialize_copies_directory_tree(tmp_path: Path) ->
         target_profile_path / "Preferences",
     ]
     assert (target_profile_path / "Default" / "Cookies").read_text(encoding="utf-8") == "cookies"
+
+
+def test_playwright_profile_materialize_makes_immutable_source_tree_writable(tmp_path: Path) -> None:
+    """Make a read-only DataSource snapshot writable only in its runtime copy."""
+
+    source_profile_path = tmp_path / "data-source" / "playwright_profile"
+    source_default_path = source_profile_path / "Default"
+    source_default_path.mkdir(parents=True)
+    (source_default_path / "Preferences").write_text("{}", encoding="utf-8")
+    source_default_path.chmod(0o555)
+    source_profile_path.chmod(0o555)
+    target_profile_path = tmp_path / "runtime-profile"
+
+    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+
+    assert target_profile_path.stat().st_mode & stat.S_IWUSR
+    assert (target_profile_path / "Default").stat().st_mode & stat.S_IWUSR
+    assert not source_profile_path.stat().st_mode & stat.S_IWUSR
 
 
 def test_playwright_profile_materialize_creates_empty_profile_when_source_is_absent(tmp_path: Path) -> None:
