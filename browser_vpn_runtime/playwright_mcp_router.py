@@ -188,6 +188,8 @@ class McpPlaywrightProfileRouter:
                     request=request,
                     request_body=request_body,
                 )
+                if source_reset_need:
+                    return await self._backend_response_proxy(request=request, upstream_response=upstream_response)
             return await self._backend_response_proxy(request=request, upstream_response=upstream_response)
         except (FileNotFoundError, ValueError) as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc

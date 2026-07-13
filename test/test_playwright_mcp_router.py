@@ -28,8 +28,9 @@ class FakePlaywrightMcpBackend:
         self.event_list = event_list
         self.start_count = 0
         self.stop_count = 0
-        self.hold_request_release: asyncio.Event | None = None
-        self.hold_request_started: asyncio.Event | None = None
+        self.hold_response_body_release: asyncio.Event | None = None
+        self.hold_response_headers_sent: asyncio.Event | None = None
+        self.stop_request_started = asyncio.Event()
         self._server: TestServer | None = None
 
     @property
@@ -57,6 +58,7 @@ class FakePlaywrightMcpBackend:
 
         if self._server is None:
             return
+        self.stop_request_started.set()
         await self._server.close()
         self._server = None
         self.stop_count += 1
@@ -81,10 +83,15 @@ class FakePlaywrightMcpBackend:
             await response.write_eof()
             return response
         if request.path == "/hold":
-            if self.hold_request_release is None or self.hold_request_started is None:
+            if self.hold_response_body_release is None or self.hold_response_headers_sent is None:
                 raise RuntimeError("hold request events are not configured")
-            self.hold_request_started.set()
-            await self.hold_request_release.wait()
+            response = web.StreamResponse(status=200, headers={"content-type": "application/json"})
+            await response.prepare(request)
+            self.hold_response_headers_sent.set()
+            await self.hold_response_body_release.wait()
+            await response.write(b'{"held": true}')
+            await response.write_eof()
+            return response
         return web.json_response(
             {
                 "body": (await request.read()).decode(),
@@ -103,8 +110,8 @@ class RouterFixture:
 
         self.backend_by_profile_map: dict[str, FakePlaywrightMcpBackend] = {}
         self.event_list: list[str] = []
-        self.hold_request_release = asyncio.Event()
-        self.hold_request_started = asyncio.Event()
+        self.hold_response_body_release = asyncio.Event()
+        self.hold_response_headers_sent = asyncio.Event()
         self.data_source_path = tmp_path / "data-source"
         (self.data_source_path / "playwright_profile").mkdir(parents=True)
         self.profile_root_path = tmp_path / "runtime" / "mcp_playwright_profile" / "profile"
@@ -123,8 +130,8 @@ class RouterFixture:
 
             profile_name = "isolated" if config.persistent_profile_path is None else config.persistent_profile_path.name
             backend = FakePlaywrightMcpBackend(config, self.event_list)
-            backend.hold_request_release = self.hold_request_release
-            backend.hold_request_started = self.hold_request_started
+            backend.hold_response_body_release = self.hold_response_body_release
+            backend.hold_response_headers_sent = self.hold_response_headers_sent
             self.backend_by_profile_map[profile_name] = backend
             return backend
 
@@ -231,9 +238,11 @@ def test_source_reset_remains_coupled_to_its_initialize_delivery(tmp_path: Path)
                     json={"jsonrpc": "2.0", "method": "initialize"},
                 )
             )
-            await asyncio.wait_for(fixture.hold_request_started.wait(), timeout=1)
+            await asyncio.wait_for(fixture.hold_response_headers_sent.wait(), timeout=1)
+            first_response = await asyncio.wait_for(first_request, timeout=1)
             target_state_path = fixture.profile_root_path / "target" / "state.txt"
             assert target_state_path.read_text(encoding="utf-8") == "first"
+            target_backend = fixture.backend_by_profile_map["target"]
 
             second_request = asyncio.create_task(
                 second_client.post(
@@ -242,11 +251,14 @@ def test_source_reset_remains_coupled_to_its_initialize_delivery(tmp_path: Path)
                 )
             )
             await asyncio.sleep(0.05)
-            assert target_state_path.read_text(encoding="utf-8") == "first"
+            second_reset_blocked = not target_backend.stop_request_started.is_set()
 
-            fixture.hold_request_release.set()
-            first_response, second_response = await asyncio.gather(first_request, second_request)
+            fixture.hold_response_body_release.set()
+            first_body = await first_response.read()
+            second_response = await second_request
+            assert second_reset_blocked
             assert first_response.status == 200
+            assert first_body == b'{"held": true}'
             assert second_response.status == 200
             assert target_state_path.read_text(encoding="utf-8") == "second"
 
