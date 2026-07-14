@@ -396,11 +396,11 @@ def playwright_mcp_command_argv_get(config: PlaywrightMcpConfig) -> list[str]:
     if not config.isolated:
         if config.persistent_profile_path is None:
             raise PlaywrightMcpError("named Playwright MCP backend requires persistent_profile_path")
-        playwright_profile_state = playwright_profile_materialize(
+        playwright_profile_materialize(
             data_source_path=config.data_source_path,
             target_profile_path=config.persistent_profile_path,
         )
-        persistent_profile_path = playwright_profile_state.profile_path
+        persistent_profile_path = config.persistent_profile_path
     vpn_proxy_ip, vpn_proxy_port = _vpn_proxy_server_resolve(config.vpn_proxy_server)
     vpn_proxy_server = _vpn_proxy_server_literal_get(proxy_ip=vpn_proxy_ip, proxy_port=vpn_proxy_port)
     _vpn_proxy_wait(config=config, proxy_ip=vpn_proxy_ip, proxy_port=vpn_proxy_port)

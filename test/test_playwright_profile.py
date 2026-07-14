@@ -1,11 +1,9 @@
 """Tests for Playwright profile materialization and snapshot helpers."""
 
 from concurrent.futures import ThreadPoolExecutor
-import json
 from pathlib import Path
 import shutil
 import stat
-import sys
 import threading
 
 import pytest
@@ -27,12 +25,11 @@ def test_playwright_profile_replace_atomically_replaces_target(tmp_path: Path) -
     target_profile_path.mkdir()
     (target_profile_path / "stale").write_text("old", encoding="utf-8")
 
-    state = playwright_profile_replace(
+    playwright_profile_replace(
         source_profile_path=source_profile_path,
         target_profile_path=target_profile_path,
     )
 
-    assert state.profile_path == target_profile_path
     assert (target_profile_path / "Default" / "Cookies").read_text(encoding="utf-8") == "new"
     assert not (target_profile_path / "stale").exists()
 
@@ -58,13 +55,11 @@ def test_playwright_profile_replace_publishes_initial_target(tmp_path: Path) -> 
     (source_profile_path / "Preferences").write_text("new", encoding="utf-8")
     target_profile_path = tmp_path / "target"
 
-    state = playwright_profile_replace(
+    playwright_profile_replace(
         source_profile_path=source_profile_path,
         target_profile_path=target_profile_path,
     )
 
-    assert state.file_path_list == [target_profile_path / "Preferences"]
-    assert state.profile_path == target_profile_path
     assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "new"
 
 
@@ -77,16 +72,39 @@ def test_playwright_profile_replace_excludes_chromium_singletons(tmp_path: Path)
         (source_profile_path / singleton_name).symlink_to("stale")
     target_profile_path = tmp_path / "target"
 
-    state = playwright_profile_replace(
+    playwright_profile_replace(
         source_profile_path=source_profile_path,
         target_profile_path=target_profile_path,
     )
 
-    assert state.file_path_list == [target_profile_path / "Preferences"]
+    assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "new"
     assert not any(
         (target_profile_path / singleton_name).exists() or (target_profile_path / singleton_name).is_symlink()
         for singleton_name in ["SingletonCookie", "SingletonLock", "SingletonSocket"]
     )
+
+
+def test_playwright_profile_replace_rejects_source_symlink_without_changing_target(tmp_path: Path) -> None:
+    """Do not dereference profile entries outside the declared source tree."""
+
+    external_path = tmp_path / "external"
+    external_path.mkdir()
+    (external_path / "Cookies").write_text("external", encoding="utf-8")
+    source_profile_path = tmp_path / "source"
+    source_profile_path.mkdir()
+    (source_profile_path / "Default").symlink_to(external_path, target_is_directory=True)
+    target_profile_path = tmp_path / "target"
+    target_profile_path.mkdir()
+    (target_profile_path / "Preferences").write_text("previous", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must not contain symlinks"):
+        playwright_profile_replace(
+            source_profile_path=source_profile_path,
+            target_profile_path=target_profile_path,
+        )
+
+    assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "previous"
+    assert (external_path / "Cookies").read_text(encoding="utf-8") == "external"
 
 
 def test_playwright_profile_replace_uses_unique_sibling_temp_directories(
@@ -119,7 +137,7 @@ def test_playwright_profile_replace_uses_unique_sibling_temp_directories(
     )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        state_list = list(
+        list(
             executor.map(
                 lambda source_profile_path: playwright_profile_replace(
                     source_profile_path=source_profile_path,
@@ -130,7 +148,6 @@ def test_playwright_profile_replace_uses_unique_sibling_temp_directories(
         )
 
     assert len(set(staged_profile_path_list)) == 2
-    assert [state.profile_path for state in state_list] == [target_profile_path, target_profile_path]
     assert (target_profile_path / "Preferences").read_text(encoding="utf-8") in {"new-0", "new-1"}
 
 
@@ -143,10 +160,9 @@ def test_playwright_profile_materialize_copies_directory_tree(tmp_path: Path) ->
     (source_profile_path / "Default" / "Cookies").write_text("cookies", encoding="utf-8")
     target_profile_path = tmp_path / "runtime-profile"
 
-    state = playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
 
-    assert state.profile_path == target_profile_path
-    assert sorted(state.file_path_list) == [
+    assert sorted(path for path in target_profile_path.rglob("*") if path.is_file()) == [
         target_profile_path / "Default" / "Cookies",
         target_profile_path / "Preferences",
     ]
@@ -215,11 +231,10 @@ def test_playwright_profile_materialize_creates_empty_profile_when_source_is_abs
     """Materialize an empty pod-local profile when DataSource has no playwright_profile prefix."""
     target_profile_path = tmp_path / "runtime-profile"
 
-    state = playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
 
-    assert state.file_path_list == []
-    assert state.profile_path == target_profile_path
     assert target_profile_path.is_dir()
+    assert not list(target_profile_path.iterdir())
 
 
 def test_playwright_profile_materialize_preserves_existing_runtime_profile(tmp_path: Path) -> None:
@@ -231,10 +246,8 @@ def test_playwright_profile_materialize_preserves_existing_runtime_profile(tmp_p
     target_profile_path.mkdir()
     (target_profile_path / "Preferences").write_text("runtime", encoding="utf-8")
 
-    state = playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
 
-    assert state.file_path_list == [target_profile_path / "Preferences"]
-    assert state.profile_path == target_profile_path
     assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
 
 
@@ -246,9 +259,8 @@ def test_playwright_profile_materialize_removes_stale_chromium_singletons(tmp_pa
     for singleton_name in ["SingletonCookie", "SingletonLock", "SingletonSocket"]:
         (target_profile_path / singleton_name).symlink_to("stale")
 
-    state = playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
 
-    assert state.profile_path == target_profile_path
     assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
     assert not any(
         (target_profile_path / singleton_name).exists() or (target_profile_path / singleton_name).is_symlink()
@@ -256,8 +268,8 @@ def test_playwright_profile_materialize_removes_stale_chromium_singletons(tmp_pa
     )
 
 
-def test_playwright_profile_materialize_excludes_removed_regular_singleton_from_state(tmp_path: Path) -> None:
-    """Return only files that remain after regular singleton cleanup."""
+def test_playwright_profile_materialize_removes_regular_singleton(tmp_path: Path) -> None:
+    """Remove a stale regular singleton file before profile reuse."""
 
     target_profile_path = tmp_path / "runtime-profile"
     target_profile_path.mkdir()
@@ -266,9 +278,9 @@ def test_playwright_profile_materialize_excludes_removed_regular_singleton_from_
     singleton_path = target_profile_path / "SingletonLock"
     singleton_path.write_text("stale", encoding="utf-8")
 
-    state = playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
 
-    assert state.file_path_list == [preferences_path]
+    assert preferences_path.read_text(encoding="utf-8") == "runtime"
     assert not singleton_path.exists()
 
 
@@ -281,14 +293,30 @@ def test_playwright_profile_materialize_removes_singletons_copied_from_source(tm
         (source_profile_path / singleton_name).symlink_to("stale")
     target_profile_path = tmp_path / "runtime-profile"
 
-    state = playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
 
-    assert state.file_path_list == [target_profile_path / "Preferences"]
-    assert state.profile_path == target_profile_path
+    assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "source"
     assert not any(
         (target_profile_path / singleton_name).exists() or (target_profile_path / singleton_name).is_symlink()
         for singleton_name in ["SingletonCookie", "SingletonLock", "SingletonSocket"]
     )
+
+
+def test_playwright_profile_materialize_rejects_symlink_target(tmp_path: Path) -> None:
+    """Do not mutate a directory reached through a caller-provided target symlink."""
+
+    external_path = tmp_path / "external"
+    external_path.mkdir()
+    external_file_path = external_path / "Preferences"
+    external_file_path.write_text("external", encoding="utf-8")
+    target_profile_path = tmp_path / "runtime-profile"
+    target_profile_path.symlink_to(external_path, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="profile target must be a regular directory"):
+        playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+
+    assert target_profile_path.is_symlink()
+    assert external_file_path.read_text(encoding="utf-8") == "external"
 
 
 def test_playwright_profile_snapshot_replaces_caller_writeback_candidate(tmp_path: Path) -> None:
@@ -299,14 +327,12 @@ def test_playwright_profile_snapshot_replaces_caller_writeback_candidate(tmp_pat
     (runtime_profile_path / "Default" / "Local Storage").write_text("storage", encoding="utf-8")
     writeback_candidate_path = tmp_path / "runtime" / "mcp_playwright_profile" / "writeback_candidate"
 
-    state = playwright_profile_snapshot(
+    playwright_profile_snapshot(
         runtime_profile_path=runtime_profile_path,
         writeback_candidate_path=writeback_candidate_path,
     )
 
     snapshot_file_path = writeback_candidate_path / "Default" / "Local Storage"
-    assert state.profile_path == writeback_candidate_path
-    assert state.file_path_list == [snapshot_file_path]
     assert snapshot_file_path.read_text(encoding="utf-8") == "storage"
 
 
@@ -324,29 +350,22 @@ def test_playwright_profile_snapshot_exchanges_before_cleanup_and_parent_fsync(
     event_list: list[str] = []
     real_directory_tree_exchange = playwright_profile._directory_tree_exchange
 
-    def fake_directory_tree_owner_set(path: Path, owner_uid: int | None, owner_gid: int | None) -> None:
-        """Record owner update and mark the temp tree."""
-        assert target_profile_path.is_dir()
-        assert owner_uid == 1000
-        assert owner_gid == 1000
-        event_list.append("owner")
-        (path / "owner.marker").write_text("owned", encoding="utf-8")
-
     def fake_directory_tree_exchange(source_path: Path, target_path: Path) -> None:
         """Record the atomic exchange while both directory names remain present."""
         event_list.append("exchange")
-        assert (source_path / "owner.marker").is_file()
         assert (target_path / "Preferences").read_text(encoding="utf-8") == "previous"
         real_directory_tree_exchange(source_path, target_path)
         assert (target_path / "Preferences").read_text(encoding="utf-8") == "runtime"
         assert (source_path / "Preferences").read_text(encoding="utf-8") == "previous"
 
-    def fake_directory_tree_remove(path: Path) -> None:
+    real_rmtree = shutil.rmtree
+
+    def fake_rmtree(path: Path) -> None:
         """Remove the exchanged old tree only while the new target remains published."""
         event_list.append("remove")
         assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
         assert (path / "Preferences").read_text(encoding="utf-8") == "previous"
-        shutil.rmtree(path)
+        real_rmtree(path)
 
     def fake_directory_fsync(path: Path) -> None:
         """Record parent fsync after the exchanged old tree is removed."""
@@ -355,21 +374,17 @@ def test_playwright_profile_snapshot_exchanges_before_cleanup_and_parent_fsync(
         assert target_profile_path.is_dir()
         assert not any(path.name.startswith(".writeback-candidate.") for path in tmp_path.iterdir())
 
-    monkeypatch.setattr(playwright_profile, "_directory_tree_owner_set", fake_directory_tree_owner_set)
     monkeypatch.setattr(playwright_profile, "_directory_tree_exchange", fake_directory_tree_exchange)
-    monkeypatch.setattr(playwright_profile, "_directory_tree_remove", fake_directory_tree_remove)
+    monkeypatch.setattr(playwright_profile.shutil, "rmtree", fake_rmtree)
     monkeypatch.setattr(playwright_profile, "_directory_fsync", fake_directory_fsync)
 
-    state = playwright_profile_snapshot(
+    playwright_profile_snapshot(
         runtime_profile_path=runtime_profile_path,
         writeback_candidate_path=target_profile_path,
-        owner_uid=1000,
-        owner_gid=1000,
     )
 
-    assert event_list == ["owner", "exchange", "remove", "fsync"]
-    assert state.profile_path == target_profile_path
-    assert (state.profile_path / "owner.marker").read_text(encoding="utf-8") == "owned"
+    assert event_list == ["exchange", "remove", "fsync"]
+    assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
 
 
 def test_playwright_profile_snapshot_preserves_existing_target_when_exchange_fails(
@@ -416,13 +431,13 @@ def test_playwright_profile_snapshot_keeps_new_target_when_old_tree_cleanup_fail
     (target_profile_path / "Preferences").write_text("previous", encoding="utf-8")
     fsync_path_list: list[Path] = []
 
-    def fake_directory_tree_remove(path: Path) -> None:
+    def fake_rmtree(path: Path) -> None:
         """Simulate cleanup failure after publication."""
         assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
         assert (path / "Preferences").read_text(encoding="utf-8") == "previous"
         raise OSError("cleanup failed")
 
-    monkeypatch.setattr(playwright_profile, "_directory_tree_remove", fake_directory_tree_remove)
+    monkeypatch.setattr(playwright_profile.shutil, "rmtree", fake_rmtree)
     monkeypatch.setattr(playwright_profile, "_directory_fsync", fsync_path_list.append)
 
     with pytest.raises(OSError, match="cleanup failed"):
@@ -461,13 +476,13 @@ def test_playwright_profile_snapshot_uses_replace_when_target_is_absent(
     monkeypatch.setattr(playwright_profile, "_directory_tree_exchange", fail_directory_tree_exchange)
     monkeypatch.setattr(playwright_profile, "_directory_fsync", lambda path: event_list.append("fsync"))
 
-    state = playwright_profile_snapshot(
+    playwright_profile_snapshot(
         runtime_profile_path=runtime_profile_path,
         writeback_candidate_path=target_profile_path,
     )
 
     assert event_list == ["replace", "fsync"]
-    assert (state.profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
+    assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
 
 
 def test_playwright_profile_existing_target_requires_linux(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -480,33 +495,3 @@ def test_playwright_profile_existing_target_requires_linux(monkeypatch: pytest.M
 
     with pytest.raises(RuntimeError, match="Linux"):
         playwright_profile._directory_tree_atomic_replace(source_path, target_path)
-
-
-def test_playwright_profile_snapshot_cli_publishes_writeback_candidate(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    """Expose profile writeback through a domain-neutral executable boundary."""
-    runtime_profile_path = tmp_path / "runtime-profile"
-    runtime_profile_path.mkdir()
-    (runtime_profile_path / "Preferences").write_text("runtime", encoding="utf-8")
-    writeback_candidate_path = tmp_path / "writeback-candidate"
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "browser-vpn-runtime-playwright-profile-snapshot",
-            "--runtime-profile-path",
-            str(runtime_profile_path),
-            "--writeback-candidate-path",
-            str(writeback_candidate_path),
-        ],
-    )
-
-    exit_code = playwright_profile.main()
-
-    payload = json.loads(capsys.readouterr().out)
-    assert exit_code == 0
-    assert payload["profile_path"] == str(writeback_candidate_path)
-    assert (writeback_candidate_path / "Preferences").read_text(encoding="utf-8") == "runtime"

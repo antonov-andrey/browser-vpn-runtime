@@ -30,11 +30,11 @@ from browser_vpn_runtime.playwright_mcp import (
 )
 from browser_vpn_runtime.playwright_profile import playwright_profile_replace, playwright_profile_snapshot
 
-DEFAULT_CANDIDATE_ROOT_PATH = Path("/runtime/mcp_playwright_profile/writeback_candidate")
-DEFAULT_MCP_BACKEND_RUNTIME_ROOT_PATH = Path("/runtime/playwright_mcp_backend")
-DEFAULT_MCP_OUTPUT_ROOT_PATH = Path("/output/.playwright-mcp")
-DEFAULT_PROFILE_ROOT_PATH = Path("/runtime/mcp_playwright_profile/profile")
-HOP_BY_HOP_HEADER_NAME_SET = {
+_DEFAULT_CANDIDATE_ROOT_PATH = Path("/runtime/mcp_playwright_profile/writeback_candidate")
+_DEFAULT_MCP_BACKEND_RUNTIME_ROOT_PATH = Path("/runtime/playwright_mcp_backend")
+_DEFAULT_MCP_OUTPUT_ROOT_PATH = Path("/output/.playwright-mcp")
+_DEFAULT_PROFILE_ROOT_PATH = Path("/runtime/mcp_playwright_profile/profile")
+_HOP_BY_HOP_HEADER_NAME_SET = {
     "connection",
     "keep-alive",
     "proxy-authenticate",
@@ -44,9 +44,9 @@ HOP_BY_HOP_HEADER_NAME_SET = {
     "transfer-encoding",
     "upgrade",
 }
-PROFILE_NAME_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,126}[A-Za-z0-9])?")
-ROUTER_QUERY_NAME_SET = {"profile", "profile_source"}
-WRITEBACK_CANDIDATE_PATH = "/runtime/mcp-playwright-profile/writeback-candidate"
+_PROFILE_NAME_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,126}[A-Za-z0-9])?")
+_ROUTER_QUERY_NAME_SET = {"profile", "profile_source"}
+_WRITEBACK_CANDIDATE_PATH = "/runtime/mcp-playwright-profile/writeback-candidate"
 
 
 class PlaywrightMcpBackendProtocol(Protocol):
@@ -78,12 +78,12 @@ class PlaywrightMcpRouterConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True, validate_default=True)
 
     backend_config: PlaywrightMcpConfig
-    backend_runtime_root_path: Path = DEFAULT_MCP_BACKEND_RUNTIME_ROOT_PATH
-    candidate_root_path: Path = DEFAULT_CANDIDATE_ROOT_PATH
+    backend_runtime_root_path: Path = _DEFAULT_MCP_BACKEND_RUNTIME_ROOT_PATH
+    candidate_root_path: Path = _DEFAULT_CANDIDATE_ROOT_PATH
     host: str = "0.0.0.0"
-    output_root_path: Path = DEFAULT_MCP_OUTPUT_ROOT_PATH
+    output_root_path: Path = _DEFAULT_MCP_OUTPUT_ROOT_PATH
     port: int = Field(default=DEFAULT_PORT, ge=1, le=65535)
-    profile_root_path: Path = DEFAULT_PROFILE_ROOT_PATH
+    profile_root_path: Path = _DEFAULT_PROFILE_ROOT_PATH
 
     @model_validator(mode="after")
     def _path_separation_validate(self) -> Self:
@@ -152,12 +152,13 @@ class McpPlaywrightProfileRouter:
             self._host_validate(request)
             route = self._route_from_request(request)
             request_body = await request.read()
+            source_reset_need = self._source_reset_need(request=request, request_body=request_body, route=route)
             if (
-                route.source_physical_profile is not None
+                not source_reset_need
+                and route.source_physical_profile is not None
                 and not (self.config.profile_root_path / route.source_physical_profile).is_dir()
             ):
                 raise FileNotFoundError(f"source profile is missing: {route.source_physical_profile}")
-            source_reset_need = self._source_reset_need(request=request, request_body=request_body, route=route)
             if route.physical_profile is None:
                 async with self._unprofiled_lock:
                     backend = await self._backend_get_start(physical_profile=None)
@@ -219,7 +220,7 @@ class McpPlaywrightProfileRouter:
         """Deliver one request and return the upstream response after headers arrive."""
 
         client_session = self._client_session_get()
-        query = MultiDict((name, value) for name, value in request.query.items() if name not in ROUTER_QUERY_NAME_SET)
+        query = MultiDict((name, value) for name, value in request.query.items() if name not in _ROUTER_QUERY_NAME_SET)
         request_headers = self._end_to_end_headers_get(request.headers)
         for name in ["content-length", "host"]:
             request_headers.popall(name, None)
@@ -314,7 +315,7 @@ class McpPlaywrightProfileRouter:
             for option in connection_header.split(",")
             if option.strip()
         }
-        for name in HOP_BY_HOP_HEADER_NAME_SET | connection_option_set:
+        for name in _HOP_BY_HOP_HEADER_NAME_SET | connection_option_set:
             end_to_end_headers.popall(name, None)
         return end_to_end_headers
 
@@ -416,7 +417,7 @@ class McpPlaywrightProfileRouter:
     def _profile_name_validate(name: str, value: str) -> str:
         """Reject a physical profile name that is unsafe for one path segment."""
 
-        if PROFILE_NAME_PATTERN.fullmatch(value) is None:
+        if _PROFILE_NAME_PATTERN.fullmatch(value) is None:
             raise ValueError(f"{name} is unsafe")
         return value
 
@@ -450,16 +451,16 @@ def _args_parse() -> argparse.Namespace:
     parser.add_argument(
         "--allowed-hosts", default=DEFAULT_ALLOWED_HOST_LIST, dest="allowed_host_list", type=_allowed_host_list_parse
     )
-    parser.add_argument("--backend-runtime-root-path", default=DEFAULT_MCP_BACKEND_RUNTIME_ROOT_PATH, type=Path)
+    parser.add_argument("--backend-runtime-root-path", default=_DEFAULT_MCP_BACKEND_RUNTIME_ROOT_PATH, type=Path)
     parser.add_argument("--browser-channel", default=DEFAULT_BROWSER_CHANNEL)
-    parser.add_argument("--candidate-root-path", default=DEFAULT_CANDIDATE_ROOT_PATH, type=Path)
+    parser.add_argument("--candidate-root-path", default=_DEFAULT_CANDIDATE_ROOT_PATH, type=Path)
     parser.add_argument("--data-source-path", required=True, type=Path)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--locale", default=DEFAULT_BROWSER_LOCALE)
     parser.add_argument("--navigation-timeout-ms", default=60000, type=int)
-    parser.add_argument("--output-root-path", default=DEFAULT_MCP_OUTPUT_ROOT_PATH, type=Path)
+    parser.add_argument("--output-root-path", default=_DEFAULT_MCP_OUTPUT_ROOT_PATH, type=Path)
     parser.add_argument("--port", default=DEFAULT_PORT, type=int)
-    parser.add_argument("--profile-root-path", default=DEFAULT_PROFILE_ROOT_PATH, type=Path)
+    parser.add_argument("--profile-root-path", default=_DEFAULT_PROFILE_ROOT_PATH, type=Path)
     parser.add_argument("--proxy-ready-timeout-seconds", default=DEFAULT_PROXY_READY_TIMEOUT_SECONDS, type=int)
     parser.add_argument("--timezone", default=DEFAULT_BROWSER_TIMEZONE)
     parser.add_argument("--viewport-height", default=1080, type=int)
@@ -516,7 +517,7 @@ def main() -> None:
     )
     router = McpPlaywrightProfileRouter(config=router_config)
     application = web.Application()
-    application.router.add_post(WRITEBACK_CANDIDATE_PATH, router.writeback_candidate_publish)
+    application.router.add_post(_WRITEBACK_CANDIDATE_PATH, router.writeback_candidate_publish)
     application.router.add_route("*", "/{path:.*}", router.request_proxy)
     application.on_cleanup.append(lambda application: router.close())
     web.run_app(application, host=router_config.host, port=router_config.port)

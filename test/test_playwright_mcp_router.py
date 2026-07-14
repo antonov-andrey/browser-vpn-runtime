@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from browser_vpn_runtime.playwright_mcp import PlaywrightMcpConfig
 from browser_vpn_runtime.playwright_mcp_router import (
-    DEFAULT_CANDIDATE_ROOT_PATH,
+    _DEFAULT_CANDIDATE_ROOT_PATH,
     McpPlaywrightProfileRouter,
     PlaywrightMcpRouterConfig,
     _args_parse,
@@ -334,8 +334,8 @@ def test_router_default_candidate_path_is_one_shared_runtime_directory(tmp_path:
 
     config = PlaywrightMcpRouterConfig(backend_config=backend_config)
 
-    assert DEFAULT_CANDIDATE_ROOT_PATH == Path("/runtime/mcp_playwright_profile/writeback_candidate")
-    assert config.candidate_root_path == DEFAULT_CANDIDATE_ROOT_PATH
+    assert _DEFAULT_CANDIDATE_ROOT_PATH == Path("/runtime/mcp_playwright_profile/writeback_candidate")
+    assert config.candidate_root_path == _DEFAULT_CANDIDATE_ROOT_PATH
 
 
 def test_router_cli_maps_allowed_hosts_to_backend_template_field(

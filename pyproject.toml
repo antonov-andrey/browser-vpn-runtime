@@ -24,7 +24,6 @@ test = [
 [project.scripts]
 browser-vpn-runtime-container-entrypoint = "browser_vpn_runtime.container_entrypoint:main"
 browser-vpn-runtime-playwright-mcp-router = "browser_vpn_runtime.playwright_mcp_router:main"
-browser-vpn-runtime-playwright-profile-snapshot = "browser_vpn_runtime.playwright_profile:main"
 browser-vpn-runtime-vpn-egress = "browser_vpn_runtime.vpn_gateway:main"
 
 [tool.setuptools.packages.find]
