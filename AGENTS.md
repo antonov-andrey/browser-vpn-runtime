@@ -5,7 +5,7 @@
 - Shared workflow-container ecosystem authoring and code quality rules live in the `workflow-container-developer` plugin reference `references/workflow-container-authoring.md`.
 - Do not add domain-specific or workflow-specific business logic.
 - Keep the runtime boundary explicit: OpenVPN owns VPN connectivity, Playwright owns browser execution, and callers own domain extraction behavior.
-- The Playwright MCP runtime must expose one runtime-owned browser stack; consumers must not configure direct `@playwright/mcp`, direct `npx`, step-local browser profiles, or caller-owned browser flags as replacements for this stack.
+- The Playwright MCP runtime must expose one runtime-owned browser stack; consumers may select logical run-local profile names through the workflow contract but must not configure direct `@playwright/mcp`, direct `npx`, physical profile paths, profile-copy operations, or caller-owned browser flags as replacements for this stack.
 - Consumers must keep workflow executors and Playwright outside the OpenVPN network namespace; only the `vpn-egress` gateway owns OpenVPN and `tun0`, while Playwright reaches that gateway through SOCKS.
 
 ## Python
