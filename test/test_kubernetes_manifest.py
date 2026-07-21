@@ -39,6 +39,23 @@ def test_kubernetes_manifest_separates_gateway_and_browser_network_ownership() -
     assert gateway_container["command"] == ["browser-vpn-runtime-vpn-egress"]
     assert gateway_container["securityContext"]["capabilities"]["add"] == ["NET_ADMIN"]
     assert gateway_container["securityContext"]["runAsUser"] == 0
+    assert gateway_container["readinessProbe"] == {
+        "exec": {
+            "command": [
+                "browser-vpn-runtime-vpn-egress-healthcheck",
+                "--target-host",
+                "one.one.one.one",
+                "--target-port",
+                "443",
+                "--timeout-seconds",
+                "3",
+            ]
+        },
+        "failureThreshold": 3,
+        "initialDelaySeconds": 10,
+        "periodSeconds": 10,
+        "timeoutSeconds": 5,
+    }
     assert gateway_service["spec"]["ports"] == [
         {"name": "socks5", "port": 1080, "protocol": "TCP", "targetPort": "socks5"}
     ]

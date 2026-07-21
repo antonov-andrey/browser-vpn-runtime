@@ -41,6 +41,20 @@ browser-vpn-runtime-vpn-egress \
   --runtime-path /runtime
 ```
 
+Check gateway readiness through a stable external TCP target:
+
+```bash
+browser-vpn-runtime-vpn-egress-healthcheck \
+  --target-host one.one.one.one \
+  --target-port 443 \
+  --timeout-seconds 3
+```
+
+The healthcheck does not accept the local Dante listener alone as readiness. It completes an
+unauthenticated SOCKS5 `CONNECT`; Dante's owner-only firewall then proves that the target connection
+uses `tun0`. A stopped Dante process, an OpenVPN reconnect, broken target DNS, or unavailable tunnel
+egress makes the command fail.
+
 ## Playwright MCP
 
 `browser-vpn-runtime-playwright-mcp-router` exposes one public MCP endpoint and lazily starts one internal `@playwright/mcp` process per active named physical profile. It also owns one unprofiled backend configured with `browser.isolated=true` and no `browser.userDataDir`. `--vpn-proxy-server hostname:port` is optional. When present, every internal backend resolves the endpoint once to a literal IP address, waits for that IP and port to accept TCP, and configures Chromium with the SOCKS5 proxy. When omitted, Chromium uses direct egress and the generated launch configuration contains no proxy field. Both modes write the same disjoint `@playwright/mcp` `0.0.77` config, stealth script, and output path. VPN-enabled mode additionally guarantees:

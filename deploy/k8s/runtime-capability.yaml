@@ -76,12 +76,19 @@ spec:
               containerPort: 1080
               protocol: TCP
           readinessProbe:
-            tcpSocket:
-              port: socks5
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            timeoutSeconds: 2
-            failureThreshold: 12
+            exec:
+              command:
+                - browser-vpn-runtime-vpn-egress-healthcheck
+                - --target-host
+                - one.one.one.one
+                - --target-port
+                - "443"
+                - --timeout-seconds
+                - "3"
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           volumeMounts:
             - name: runtime-secret-root
               mountPath: /input/.secret
