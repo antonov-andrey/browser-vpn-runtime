@@ -55,33 +55,33 @@ def _vpn_proxy_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket, "create_connection", lambda address, timeout: _ReadyProxyConnection())
 
 
-def _runtime_data_source_create(tmp_path: Path) -> Path:
-    """Create a minimal browser/VPN DataSource fixture.
+def _runtime_secret_root_create(tmp_path: Path) -> Path:
+    """Create a minimal browser/VPN secret root fixture.
 
     Args:
         tmp_path: Pytest temporary path.
 
     Returns:
-        Fixture DataSource path.
+        Fixture secret root path.
     """
 
-    data_source_path = tmp_path / "data-source"
-    openvpn_path = data_source_path / "openvpn"
+    secret_root_path = tmp_path / "secret-root"
+    openvpn_path = secret_root_path / "openvpn"
     openvpn_path.mkdir(parents=True)
     (openvpn_path / "config.json").write_text(
         '{"login": "vpn-user", "openvpn_config_name": "client.ovpn", "password": "vpn-password"}\n',
         encoding="utf-8",
     )
     (openvpn_path / "client.ovpn").write_text("client\n", encoding="utf-8")
-    source_profile_path = data_source_path / "playwright_profile"
+    source_profile_path = secret_root_path / "playwright_profile"
     source_profile_path.mkdir()
     (source_profile_path / "Preferences").write_text("prefs", encoding="utf-8")
-    return data_source_path
+    return secret_root_path
 
 
 def test_playwright_mcp_command_uses_runtime_context(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Build Playwright MCP argv through the browser/VPN runtime boundary."""
-    data_source_path = _runtime_data_source_create(tmp_path)
+    secret_root_path = _runtime_secret_root_create(tmp_path)
     persistent_profile_path = tmp_path / "runtime-profile"
     output_dir = tmp_path / ".playwright-mcp" / "current"
     mcp_config_path = tmp_path / "mcp" / "config.json"
@@ -91,7 +91,7 @@ def test_playwright_mcp_command_uses_runtime_context(monkeypatch: pytest.MonkeyP
         lambda host, port, type: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.42.0.8", port))],
     )
     config = PlaywrightMcpConfig(
-        data_source_path=data_source_path,
+        secret_root_path=secret_root_path,
         locale_config=BrowserLocaleConfig(locale="tr-TR"),
         mcp_config_path=mcp_config_path,
         output_dir=output_dir,
@@ -139,6 +139,24 @@ def test_playwright_mcp_command_uses_runtime_context(monkeypatch: pytest.MonkeyP
     assert output_dir.is_dir()
 
 
+def test_playwright_mcp_command_without_vpn_omits_proxy(tmp_path: Path) -> None:
+    """Launch the browser directly when no VPN proxy endpoint is configured."""
+
+    secret_root_path = _runtime_secret_root_create(tmp_path)
+    mcp_config_path = tmp_path / "mcp" / "config.json"
+    config = PlaywrightMcpConfig(
+        secret_root_path=secret_root_path,
+        mcp_config_path=mcp_config_path,
+        output_dir=tmp_path / ".playwright-mcp" / "current",
+        persistent_profile_path=tmp_path / "runtime-profile",
+    )
+
+    playwright_mcp_command_argv_get(config)
+
+    config_payload = json.loads(mcp_config_path.read_text(encoding="utf-8"))
+    assert "proxy" not in config_payload["browser"]["launchOptions"]
+
+
 def test_playwright_mcp_backend_starts_new_process_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -159,7 +177,7 @@ def test_playwright_mcp_backend_starts_new_process_session(
         """Treat the fake process as ready."""
 
     config = PlaywrightMcpConfig(
-        data_source_path=tmp_path / "data-source",
+        secret_root_path=tmp_path / "secret-root",
         output_dir=tmp_path / ".playwright-mcp" / "target",
         persistent_profile_path=tmp_path / "profile",
         vpn_proxy_server="vpn-egress:1080",
@@ -194,7 +212,7 @@ def test_playwright_mcp_backend_stops_owned_process_group(
             raise ProcessLookupError
 
     config = PlaywrightMcpConfig(
-        data_source_path=tmp_path / "data-source",
+        secret_root_path=tmp_path / "secret-root",
         output_dir=tmp_path / ".playwright-mcp" / "target",
         persistent_profile_path=tmp_path / "profile",
         vpn_proxy_server="vpn-egress:1080",
@@ -214,7 +232,7 @@ def test_playwright_mcp_config_keeps_output_root_separate_from_runtime_paths(
     tmp_path: Path,
 ) -> None:
     """Write MCP file output under caller-owned root while runtime files stay scoped."""
-    data_source_path = _runtime_data_source_create(tmp_path)
+    secret_root_path = _runtime_secret_root_create(tmp_path)
     output_dir = tmp_path / "output" / ".playwright-mcp" / "current"
     runtime_path = tmp_path / "runtime" / "browser_vpn_runtime"
     mcp_config_path = runtime_path / "playwright_mcp" / "config.json"
@@ -226,7 +244,7 @@ def test_playwright_mcp_config_keeps_output_root_separate_from_runtime_paths(
         lambda host, port, type: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.42.0.8", port))],
     )
     config = PlaywrightMcpConfig(
-        data_source_path=data_source_path,
+        secret_root_path=secret_root_path,
         mcp_config_path=mcp_config_path,
         output_dir=output_dir,
         persistent_profile_path=persistent_profile_path,
@@ -250,7 +268,7 @@ def test_playwright_mcp_config_keeps_output_root_separate_from_runtime_paths(
 
 def test_playwright_mcp_command_declares_allowed_hosts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Allow workflow containers to reach the MCP server through a runtime-owned service host."""
-    data_source_path = _runtime_data_source_create(tmp_path)
+    secret_root_path = _runtime_secret_root_create(tmp_path)
     monkeypatch.setattr(
         socket,
         "getaddrinfo",
@@ -258,7 +276,7 @@ def test_playwright_mcp_command_declares_allowed_hosts(monkeypatch: pytest.Monke
     )
     config = PlaywrightMcpConfig(
         allowed_host_list=["localhost", "127.0.0.1", "openvpn"],
-        data_source_path=data_source_path,
+        secret_root_path=secret_root_path,
         host="0.0.0.0",
         mcp_config_path=tmp_path / "mcp" / "config.json",
         output_dir=tmp_path / ".playwright-mcp" / "current",
@@ -275,16 +293,16 @@ def test_playwright_mcp_command_declares_allowed_hosts(monkeypatch: pytest.Monke
     )
 
 
-def test_playwright_mcp_command_uses_proxy_without_openvpn_data_source(
+def test_playwright_mcp_command_uses_proxy_without_openvpn_secret_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Build Playwright MCP argv when OpenVPN metadata remains gateway-only."""
-    data_source_path = tmp_path / "data-source"
-    data_source_path.mkdir()
+    secret_root_path = tmp_path / "secret-root"
+    secret_root_path.mkdir()
     persistent_profile_path = tmp_path / "runtime-profile"
     output_dir = tmp_path / ".playwright-mcp" / "current"
     config = PlaywrightMcpConfig(
-        data_source_path=data_source_path,
+        secret_root_path=secret_root_path,
         mcp_config_path=tmp_path / "mcp" / "config.json",
         output_dir=output_dir,
         persistent_profile_path=persistent_profile_path,
@@ -308,8 +326,8 @@ def test_playwright_mcp_isolated_backend_omits_persistent_profile_and_shared_con
 ) -> None:
     """Generate the unprofiled backend with native MCP isolated-session mode."""
 
-    data_source_path = tmp_path / "data-source"
-    data_source_path.mkdir()
+    secret_root_path = tmp_path / "secret-root"
+    secret_root_path.mkdir()
     mcp_config_path = tmp_path / "runtime" / "unprofiled" / "config.json"
     monkeypatch.setattr(
         socket,
@@ -317,7 +335,7 @@ def test_playwright_mcp_isolated_backend_omits_persistent_profile_and_shared_con
         lambda host, port, type: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.42.0.8", port))],
     )
     config = PlaywrightMcpConfig(
-        data_source_path=data_source_path,
+        secret_root_path=secret_root_path,
         isolated=True,
         mcp_config_path=mcp_config_path,
         output_dir=tmp_path / ".playwright-mcp" / "unprofiled",
@@ -339,14 +357,14 @@ def test_playwright_mcp_config_rejects_inconsistent_isolated_profile_combination
 
     with pytest.raises(ValueError, match="isolated backend must omit persistent_profile_path"):
         PlaywrightMcpConfig(
-            data_source_path=tmp_path / "data-source",
+            secret_root_path=tmp_path / "secret-root",
             isolated=True,
             persistent_profile_path=tmp_path / "profile",
             vpn_proxy_server="vpn-egress:1080",
         )
     with pytest.raises(ValueError, match="named backend requires persistent_profile_path"):
         PlaywrightMcpConfig(
-            data_source_path=tmp_path / "data-source",
+            secret_root_path=tmp_path / "secret-root",
             persistent_profile_path=None,
             vpn_proxy_server="vpn-egress:1080",
         )
@@ -354,12 +372,12 @@ def test_playwright_mcp_config_rejects_inconsistent_isolated_profile_combination
 
 def test_playwright_mcp_rejects_output_dir_outside_artifact_namespace(tmp_path: Path) -> None:
     """Reject Playwright MCP output roots that would write files beside workflow artifacts."""
-    data_source_path = tmp_path / "data-source"
-    data_source_path.mkdir()
+    secret_root_path = tmp_path / "secret-root"
+    secret_root_path.mkdir()
 
     with pytest.raises(ValueError, match="output_dir must be scoped under a .playwright-mcp directory"):
         PlaywrightMcpConfig(
-            data_source_path=data_source_path,
+            secret_root_path=secret_root_path,
             output_dir=tmp_path / "output",
             vpn_proxy_server="vpn-egress:1080",
         )
@@ -368,7 +386,7 @@ def test_playwright_mcp_rejects_output_dir_outside_artifact_namespace(tmp_path: 
 def test_browser_locale_config_uses_neutral_runtime_defaults(tmp_path: Path) -> None:
     """Keep caller-specific locale selection out of generic runtime defaults."""
     locale_config = BrowserLocaleConfig()
-    mcp_config = PlaywrightMcpConfig(data_source_path=tmp_path / "data-source", vpn_proxy_server="vpn-egress:1080")
+    mcp_config = PlaywrightMcpConfig(secret_root_path=tmp_path / "secret-root", vpn_proxy_server="vpn-egress:1080")
 
     assert locale_config.locale == "en-US"
     assert locale_config.navigator_language_list == ["en-US", "en"]
@@ -412,7 +430,7 @@ def test_playwright_mcp_applies_one_locale_config_to_context_profile_and_stealth
     tmp_path: Path,
 ) -> None:
     """Use one locale object for HTTP, profile, and navigator language configuration."""
-    data_source_path = _runtime_data_source_create(tmp_path)
+    secret_root_path = _runtime_secret_root_create(tmp_path)
     persistent_profile_path = tmp_path / "runtime-profile"
     mcp_config_path = tmp_path / "runtime" / "playwright_mcp" / "config.json"
     captured_language_list: list[str] = []
@@ -434,7 +452,7 @@ def test_playwright_mcp_applies_one_locale_config_to_context_profile_and_stealth
     monkeypatch.setattr(playwright_mcp, "Stealth", FakeStealth)
     locale_config = BrowserLocaleConfig(locale="de-DE")
     config = PlaywrightMcpConfig(
-        data_source_path=data_source_path,
+        secret_root_path=secret_root_path,
         locale_config=locale_config,
         mcp_config_path=mcp_config_path,
         output_dir=tmp_path / ".playwright-mcp" / "current",
@@ -465,4 +483,4 @@ def test_playwright_mcp_applies_one_locale_config_to_context_profile_and_stealth
 def test_playwright_mcp_rejects_non_endpoint_proxy_server(tmp_path: Path, vpn_proxy_server: str) -> None:
     """Require one strict host-and-port SOCKS endpoint."""
     with pytest.raises(ValueError, match="vpn_proxy_server"):
-        PlaywrightMcpConfig(data_source_path=tmp_path / "data-source", vpn_proxy_server=vpn_proxy_server)
+        PlaywrightMcpConfig(secret_root_path=tmp_path / "secret-root", vpn_proxy_server=vpn_proxy_server)

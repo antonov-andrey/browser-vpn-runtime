@@ -10,54 +10,54 @@ from browser_vpn_runtime.openvpn import OpenVpnConfigError, openvpn_auth_file_wr
 from browser_vpn_runtime.vpn_gateway import VpnEgressGateway
 
 
-def _vpn_data_source_create(tmp_path: Path) -> Path:
-    """Create one valid DataSource with OpenVPN credentials.
+def _vpn_secret_root_create(tmp_path: Path) -> Path:
+    """Create one valid secret root with OpenVPN credentials.
 
     Args:
         tmp_path: Pytest temporary directory.
 
     Returns:
-        DataSource path.
+        secret root path.
     """
 
-    data_source_path = tmp_path / "data-source"
-    openvpn_path = data_source_path / "openvpn"
+    secret_root_path = tmp_path / "secret-root"
+    openvpn_path = secret_root_path / "openvpn"
     openvpn_path.mkdir(parents=True)
     (openvpn_path / "config.json").write_text(
         '{"login": "vpn-user", "openvpn_config_name": "client.ovpn", "password": "vpn-password"}\n',
         encoding="utf-8",
     )
     (openvpn_path / "client.ovpn").write_text("client\n", encoding="utf-8")
-    return data_source_path
+    return secret_root_path
 
 
 def test_openvpn_auth_file_write_returns_minimal_launch_config(tmp_path: Path) -> None:
     """Expose only the two paths required to launch OpenVPN."""
-    data_source_path = _vpn_data_source_create(tmp_path)
+    secret_root_path = _vpn_secret_root_create(tmp_path)
 
-    launch_config = openvpn_auth_file_write(data_source_path, tmp_path / "runtime")
+    launch_config = openvpn_auth_file_write(secret_root_path, tmp_path / "runtime")
 
     assert set(type(launch_config).model_fields) == {"auth_file_path", "openvpn_config_path"}
     assert launch_config.auth_file_path.read_text(encoding="utf-8") == "vpn-user\nvpn-password\n"
-    assert launch_config.openvpn_config_path == data_source_path / "openvpn" / "client.ovpn"
+    assert launch_config.openvpn_config_path == secret_root_path / "openvpn" / "client.ovpn"
     assert not hasattr(openvpn, "openvpn_config_validate")
 
 
 def test_openvpn_auth_file_write_fails_when_named_file_is_missing(tmp_path: Path) -> None:
     """Report a missing .ovpn file instead of accepting a dangling config name."""
-    data_source_path = _vpn_data_source_create(tmp_path)
-    (data_source_path / "openvpn" / "client.ovpn").unlink()
+    secret_root_path = _vpn_secret_root_create(tmp_path)
+    (secret_root_path / "openvpn" / "client.ovpn").unlink()
 
     with pytest.raises(OpenVpnConfigError, match="client.ovpn"):
-        openvpn_auth_file_write(data_source_path, tmp_path / "runtime")
+        openvpn_auth_file_write(secret_root_path, tmp_path / "runtime")
 
 
 def test_vpn_egress_gateway_writes_authenticated_fail_closed_supervised_runtime(tmp_path: Path) -> None:
     """Generate the Dante, firewall, hook, and supervisor runtime owned by the gateway."""
-    data_source_path = _vpn_data_source_create(tmp_path)
+    secret_root_path = _vpn_secret_root_create(tmp_path)
     resolv_config_path = tmp_path / "resolv.conf"
     gateway = VpnEgressGateway(
-        data_source_path=data_source_path,
+        secret_root_path=secret_root_path,
         resolv_config_path=resolv_config_path,
         runtime_path=tmp_path / "runtime",
     )
@@ -128,7 +128,7 @@ def test_vpn_egress_gateway_writes_authenticated_fail_closed_supervised_runtime(
     )
     supervisor_config = state.supervisor_config_path.read_text(encoding="utf-8")
     assert (
-        f"command=/usr/sbin/openvpn --config {data_source_path / 'openvpn' / 'client.ovpn'} --auth-user-pass {state.auth_file_path} --persist-tun --script-security 2 --up {state.openvpn_up_hook_path} --down {state.openvpn_down_hook_path} --down-pre --up-restart"
+        f"command=/usr/sbin/openvpn --config {secret_root_path / 'openvpn' / 'client.ovpn'} --auth-user-pass {state.auth_file_path} --persist-tun --script-security 2 --up {state.openvpn_up_hook_path} --down {state.openvpn_down_hook_path} --down-pre --up-restart"
         in supervisor_config
     )
     assert f"command=/usr/sbin/sockd -f {state.dante_config_path}" in supervisor_config
@@ -150,8 +150,8 @@ def test_vpn_egress_gateway_resolves_remote_before_installing_tunnel_dns(
         tmp_path: Pytest temporary directory.
     """
 
-    data_source_path = _vpn_data_source_create(tmp_path)
-    (data_source_path / "openvpn" / "client.ovpn").write_text(
+    secret_root_path = _vpn_secret_root_create(tmp_path)
+    (secret_root_path / "openvpn" / "client.ovpn").write_text(
         "client\nremote vpn.example 8000 tcp\n",
         encoding="utf-8",
     )
@@ -184,7 +184,7 @@ def test_vpn_egress_gateway_resolves_remote_before_installing_tunnel_dns(
 
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
     gateway = VpnEgressGateway(
-        data_source_path=data_source_path,
+        secret_root_path=secret_root_path,
         hosts_config_path=hosts_config_path,
         resolv_config_path=resolv_config_path,
         runtime_path=tmp_path / "runtime",

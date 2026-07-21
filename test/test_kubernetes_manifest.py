@@ -55,7 +55,7 @@ def test_kubernetes_manifest_separates_gateway_and_browser_network_ownership() -
     assert all(mount["mountPath"] != "/dev/net/tun" for mount in browser_container["volumeMounts"])
     assert browser_container["args"] == [
         "browser-vpn-runtime-playwright-mcp-router",
-        "--data-source-path",
+        "--secret-root-path",
         "/input/.secret",
         "--profile-root-path",
         "/runtime/mcp_playwright_profile/profile",
@@ -103,7 +103,7 @@ def test_kubernetes_manifest_limits_browser_egress_to_proxy_and_service_dns() ->
 
 
 def test_kubernetes_manifest_keeps_vpn_secret_and_tun_out_of_browser_pod() -> None:
-    """Mount the full DataSource and tunnel device only into the VPN gateway."""
+    """Mount the full secret root and tunnel device only into the VPN gateway."""
     resource_list = list(yaml.safe_load_all(Path("deploy/k8s/runtime-capability.yaml").read_text(encoding="utf-8")))
     gateway_deployment = _resource_by_kind_and_name_get(resource_list, "Deployment", "vpn-egress")
     browser_deployment = _resource_by_kind_and_name_get(resource_list, "Deployment", "browser-mcp")
@@ -116,7 +116,7 @@ def test_kubernetes_manifest_keeps_vpn_secret_and_tun_out_of_browser_pod() -> No
     assert gateway_mount_by_path_map["/dev/net/tun"]["name"] == "tun-device"
     assert browser_mount_by_path_map["/input/.secret/playwright_profile"] == {
         "mountPath": "/input/.secret/playwright_profile",
-        "name": "runtime-data-source",
+        "name": "runtime-secret-root",
         "readOnly": True,
         "subPath": "playwright_profile",
     }

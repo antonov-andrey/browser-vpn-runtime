@@ -1,13 +1,13 @@
 # Browser VPN Runtime
 
-`browser-vpn-runtime` is a reusable browser capability with a stable SOCKS5 boundary between browser execution and OpenVPN. It owns browser profile preparation, runtime-owned Playwright MCP startup, and a separately deployed VPN egress gateway. It does not own workflow orchestration, extraction behavior, or domain-specific logic.
+`browser-vpn-runtime` is a reusable browser capability with optional OpenVPN egress. It owns browser profile preparation, runtime-owned Playwright MCP startup, and the separately deployable VPN egress gateway used only when requested. It does not own workflow orchestration, extraction behavior, or domain-specific logic.
 
 ## Runtime Layout
 
-A DataSource contains a materialized browser profile directory and the gateway-owned OpenVPN input:
+A secret root always contains a materialized browser profile directory. VPN-enabled deployments additionally contain the gateway-owned OpenVPN input:
 
 ```text
-<data-source>/
+<secret-root>/
   openvpn/
     config.json
     <name>.ovpn
@@ -27,7 +27,7 @@ The config name is one local `.ovpn` file name. It cannot contain `/`, `..`, or 
 
 ## VPN Egress Gateway
 
-`browser-vpn-runtime-vpn-egress` runs OpenVPN and Alpine's packaged Dante `sockd` under Alpine's packaged `supervisord`. It writes the Dante, supervisor, firewall, and OpenVPN hook files into `/runtime/vpn-egress/`, installs its firewall before the supervisor starts, and never rewrites the DataSource `.ovpn` file. Before installing tunnel-only target DNS, the gateway resolves every named OpenVPN `remote` through the container's bootstrap resolver and pins the resulting addresses in the container hosts file. OpenVPN reconnects therefore do not depend on DNS routed through the tunnel. A container restart resolves the provider endpoints again. Dante's unprivileged target DNS traffic can reach the configured public resolvers only through `tun0`.
+`browser-vpn-runtime-vpn-egress` runs OpenVPN and Alpine's packaged Dante `sockd` under Alpine's packaged `supervisord`. It writes the Dante, supervisor, firewall, and OpenVPN hook files into `/runtime/vpn-egress/`, installs its firewall before the supervisor starts, and never rewrites the secret root `.ovpn` file. Before installing tunnel-only target DNS, the gateway resolves every named OpenVPN `remote` through the container's bootstrap resolver and pins the resulting addresses in the container hosts file. OpenVPN reconnects therefore do not depend on DNS routed through the tunnel. A container restart resolves the provider endpoints again. Dante's unprivileged target DNS traffic can reach the configured public resolvers only through `tun0`.
 
 Dante listens on TCP `1080` and runs target traffic as the unprivileged `vpnproxy` user. Its generated IPv4 and IPv6 output chains allow only established replies and new `vpnproxy` traffic with output interface `tun0`; every other `vpnproxy` output packet is dropped. The gateway can still establish OpenVPN as root, but Dante cannot fall back to `eth0` when the tunnel disappears.
 
@@ -37,13 +37,13 @@ Run the gateway directly:
 
 ```bash
 browser-vpn-runtime-vpn-egress \
-  --data-source-path /input/.secret \
+  --secret-root-path /input/.secret \
   --runtime-path /runtime
 ```
 
 ## Playwright MCP
 
-`browser-vpn-runtime-playwright-mcp-router` exposes one public MCP endpoint and lazily starts one internal `@playwright/mcp` process per active named physical profile. It also owns one unprofiled backend configured with `browser.isolated=true` and no `browser.userDataDir`. Every internal backend requires the same strict `--vpn-proxy-server hostname:port` endpoint. Before Chromium starts, the backend resolves the endpoint once to a literal IP address, waits for that IP and port to accept TCP, then writes its disjoint `@playwright/mcp` `0.0.77` config, stealth script, and output path with:
+`browser-vpn-runtime-playwright-mcp-router` exposes one public MCP endpoint and lazily starts one internal `@playwright/mcp` process per active named physical profile. It also owns one unprofiled backend configured with `browser.isolated=true` and no `browser.userDataDir`. `--vpn-proxy-server hostname:port` is optional. When present, every internal backend resolves the endpoint once to a literal IP address, waits for that IP and port to accept TCP, and configures Chromium with the SOCKS5 proxy. When omitted, Chromium uses direct egress and the generated launch configuration contains no proxy field. Both modes write the same disjoint `@playwright/mcp` `0.0.77` config, stealth script, and output path. VPN-enabled mode additionally guarantees:
 
 - a `socks5://<literal-ip>:<port>` Playwright launch proxy;
 - `--disable-quic`;
@@ -64,11 +64,11 @@ Public MCP requests select profiles structurally:
 - `?profile=<target>&profile_source=<source>` atomically resets the target from a run-local physical source only for a new MCP `initialize` POST without `mcp-session-id`. Follow-up requests in that session do not reset it.
 - no profile query uses the single unprofiled isolated-session backend and creates no named profile directory.
 
-A named target without `profile_source` is copied from the immutable `<data-source>/playwright_profile` directory only when the target does not yet exist. The source directory is always materialized by the platform, and may be empty. Unsafe or duplicate profile values, a source without a target, equal source and target, and a missing explicit source are rejected.
+A named target without `profile_source` is copied from the immutable `<secret-root>/playwright_profile` directory only when the target does not yet exist. The source directory is always materialized by the platform, and may be empty. Unsafe or duplicate profile values, a source without a target, equal source and target, and a missing explicit source are rejected.
 
 ```bash
 browser-vpn-runtime-playwright-mcp-router \
-  --data-source-path /input/.secret \
+  --secret-root-path /input/.secret \
   --profile-root-path /runtime/mcp_playwright_profile/profile \
   --candidate-root-path /runtime/mcp_playwright_profile/writeback_candidate \
   --output-root-path /output/.playwright-mcp \
@@ -85,7 +85,7 @@ Backend output directories stay inside the runtime-owned `.playwright-mcp` artif
 
 ## Kubernetes Reference
 
-`deploy/k8s/runtime-capability.yaml` declares independent `vpn-egress` and `browser-mcp` Deployments and matching Services. Only `vpn-egress` gets `NET_ADMIN`, `/dev/net/tun`, and the full read-only DataSource. `browser-mcp` has no tunnel device or network-administration capability and receives only the immutable source profile subdirectory. The writeback PVC owns `/runtime/mcp_playwright_profile`, while the run-local profile PVC is mounted at its `/profile` child; candidate staging and atomic replacement therefore stay on the writeback filesystem. Its egress NetworkPolicy permits TCP `1080` to the gateway and TCP/UDP `53` to kube-dns; direct target traffic is denied.
+`deploy/k8s/runtime-capability.yaml` declares independent `vpn-egress` and `browser-mcp` Deployments and matching Services. Only `vpn-egress` gets `NET_ADMIN`, `/dev/net/tun`, and the full read-only secret root. `browser-mcp` has no tunnel device or network-administration capability and receives only the immutable source profile subdirectory. The writeback PVC owns `/runtime/mcp_playwright_profile`, while the run-local profile PVC is mounted at its `/profile` child; candidate staging and atomic replacement therefore stay on the writeback filesystem. Its egress NetworkPolicy permits TCP `1080` to the gateway and TCP/UDP `53` to kube-dns; direct target traffic is denied.
 
 The source PVC used by this reference must contain `playwright_profile/`; an empty directory is valid for a first-run profile. Kubernetes requires the source of this read-only `subPath` mount to exist before the browser pod starts.
 

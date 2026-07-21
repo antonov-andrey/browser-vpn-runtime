@@ -51,9 +51,9 @@ spec:
     spec:
       restartPolicy: Always
       volumes:
-        - name: runtime-data-source
+        - name: runtime-secret-root
           persistentVolumeClaim:
-            claimName: browser-vpn-runtime-data-source
+            claimName: browser-vpn-runtime-secret-root
             readOnly: true
         - name: runtime-work
           emptyDir: {}
@@ -83,7 +83,7 @@ spec:
             timeoutSeconds: 2
             failureThreshold: 12
           volumeMounts:
-            - name: runtime-data-source
+            - name: runtime-secret-root
               mountPath: /input/.secret
               readOnly: true
             - name: runtime-work
@@ -135,9 +135,9 @@ spec:
         - name: profile-writeback
           persistentVolumeClaim:
             claimName: browser-vpn-runtime-profile-writeback
-        - name: runtime-data-source
+        - name: runtime-secret-root
           persistentVolumeClaim:
-            claimName: browser-vpn-runtime-data-source
+            claimName: browser-vpn-runtime-secret-root
             readOnly: true
         - name: runtime-work
           emptyDir: {}
@@ -146,7 +146,7 @@ spec:
           image: browser-vpn-runtime-playwright:latest
           args:
             - browser-vpn-runtime-playwright-mcp-router
-            - --data-source-path
+            - --secret-root-path
             - /input/.secret
             - --profile-root-path
             - /runtime/mcp_playwright_profile/profile
@@ -193,7 +193,7 @@ spec:
               mountPath: /runtime/mcp_playwright_profile/profile
             - name: profile-writeback
               mountPath: /runtime/mcp_playwright_profile
-            - name: runtime-data-source
+            - name: runtime-secret-root
               mountPath: /input/.secret/playwright_profile
               readOnly: true
               subPath: playwright_profile

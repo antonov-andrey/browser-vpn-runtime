@@ -46,7 +46,7 @@ class PlaywrightMcpConfig(BaseModel):
     action_timeout_ms: int = Field(default=DEFAULT_ACTION_TIMEOUT_MS, ge=1)
     allowed_host_list: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOST_LIST))
     browser_channel: str = DEFAULT_BROWSER_CHANNEL
-    data_source_path: Path
+    secret_root_path: Path
     host: str = DEFAULT_MCP_HOST
     isolated: bool = False
     locale_config: BrowserLocaleConfig = Field(default_factory=BrowserLocaleConfig)
@@ -59,7 +59,7 @@ class PlaywrightMcpConfig(BaseModel):
     viewport_height: int = Field(default=1080, ge=1)
     viewport_width: int = Field(default=1920, ge=1)
     proxy_ready_timeout_seconds: int = Field(default=DEFAULT_PROXY_READY_TIMEOUT_SECONDS, ge=0)
-    vpn_proxy_server: str
+    vpn_proxy_server: str = ""
 
     @model_validator(mode="after")
     def _playwright_mcp_launch_contract_validate(self) -> Self:
@@ -78,7 +78,8 @@ class PlaywrightMcpConfig(BaseModel):
             raise ValueError("isolated backend must omit persistent_profile_path")
         if not self.isolated and self.persistent_profile_path is None:
             raise ValueError("named backend requires persistent_profile_path")
-        _vpn_proxy_endpoint_get(self.vpn_proxy_server)
+        if self.vpn_proxy_server:
+            _vpn_proxy_endpoint_get(self.vpn_proxy_server)
         return self
 
 
@@ -137,13 +138,27 @@ def _mcp_config_payload_get(
         config: Validated launcher config.
         persistent_profile_path: Pod-local persistent profile path, or `None` for isolated sessions.
         stealth_script_path: JavaScript init script path generated from stealth.
-        vpn_proxy_server: Literal resolved SOCKS5 proxy server endpoint.
+        vpn_proxy_server: Literal resolved SOCKS5 proxy server endpoint, or an empty string for direct egress.
 
     Returns:
         JSON-serializable Playwright MCP config payload.
     """
 
     viewport_by_axis_map = {"height": config.viewport_height, "width": config.viewport_width}
+    launch_option_json: dict[str, object] = {
+        "args": _launch_arg_list_get(
+            viewport_height=config.viewport_height,
+            viewport_width=config.viewport_width,
+        ),
+        "channel": config.browser_channel,
+        "chromiumSandbox": False,
+        "headless": False,
+    }
+    if vpn_proxy_server:
+        launch_option_json["proxy"] = {
+            "bypass": "<-loopback>",
+            "server": f"socks5://{vpn_proxy_server}",
+        }
     browser_payload: dict[str, object] = {
         "browserName": "chromium",
         "contextOptions": {
@@ -158,19 +173,7 @@ def _mcp_config_payload_get(
         },
         "initScript": [str(stealth_script_path)],
         "isolated": config.isolated,
-        "launchOptions": {
-            "args": _launch_arg_list_get(
-                viewport_height=config.viewport_height,
-                viewport_width=config.viewport_width,
-            ),
-            "channel": config.browser_channel,
-            "chromiumSandbox": False,
-            "headless": False,
-            "proxy": {
-                "bypass": "<-loopback>",
-                "server": f"socks5://{vpn_proxy_server}",
-            },
-        },
+        "launchOptions": launch_option_json,
     }
     if persistent_profile_path is not None:
         browser_payload["userDataDir"] = str(persistent_profile_path)
@@ -397,13 +400,15 @@ def playwright_mcp_command_argv_get(config: PlaywrightMcpConfig) -> list[str]:
         if config.persistent_profile_path is None:
             raise PlaywrightMcpError("named Playwright MCP backend requires persistent_profile_path")
         playwright_profile_materialize(
-            data_source_path=config.data_source_path,
+            secret_root_path=config.secret_root_path,
             target_profile_path=config.persistent_profile_path,
         )
         persistent_profile_path = config.persistent_profile_path
-    vpn_proxy_ip, vpn_proxy_port = _vpn_proxy_server_resolve(config.vpn_proxy_server)
-    vpn_proxy_server = _vpn_proxy_server_literal_get(proxy_ip=vpn_proxy_ip, proxy_port=vpn_proxy_port)
-    _vpn_proxy_wait(config=config, proxy_ip=vpn_proxy_ip, proxy_port=vpn_proxy_port)
+    vpn_proxy_server = ""
+    if config.vpn_proxy_server:
+        vpn_proxy_ip, vpn_proxy_port = _vpn_proxy_server_resolve(config.vpn_proxy_server)
+        vpn_proxy_server = _vpn_proxy_server_literal_get(proxy_ip=vpn_proxy_ip, proxy_port=vpn_proxy_port)
+        _vpn_proxy_wait(config=config, proxy_ip=vpn_proxy_ip, proxy_port=vpn_proxy_port)
     config.output_dir.mkdir(parents=True, exist_ok=True)
     if persistent_profile_path is not None:
         _profile_language_preference_sync(

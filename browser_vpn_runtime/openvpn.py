@@ -1,4 +1,4 @@
-"""OpenVPN DataSource validation helpers."""
+"""OpenVPN secret root validation helpers."""
 
 import json
 from pathlib import Path
@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 
 class OpenVpnConfigError(RuntimeError):
-    """Raised when OpenVPN DataSource configuration is invalid."""
+    """Raised when OpenVPN secret root configuration is invalid."""
 
 
 class _OpenVpnConfigDocument(BaseModel):
@@ -53,11 +53,11 @@ class OpenVpnLaunchConfig(BaseModel):
     openvpn_config_path: Path
 
 
-def _openvpn_config_load(data_source_path: Path) -> _OpenVpnConfigDocument:
-    """Load and validate openvpn/config.json from a DataSource directory.
+def _openvpn_config_load(secret_root_path: Path) -> _OpenVpnConfigDocument:
+    """Load and validate openvpn/config.json from a secret root directory.
 
     Args:
-        data_source_path: DataSource root path.
+        secret_root_path: Read-only secret root path.
 
     Returns:
         Strict OpenVPN config document.
@@ -66,7 +66,7 @@ def _openvpn_config_load(data_source_path: Path) -> _OpenVpnConfigDocument:
         OpenVpnConfigError: If config metadata is missing or invalid.
     """
 
-    openvpn_metadata_path = data_source_path / "openvpn" / "config.json"
+    openvpn_metadata_path = secret_root_path / "openvpn" / "config.json"
     try:
         payload = json.loads(openvpn_metadata_path.read_text(encoding="utf-8"))
         return _OpenVpnConfigDocument(**payload)
@@ -78,11 +78,11 @@ def _openvpn_config_load(data_source_path: Path) -> _OpenVpnConfigDocument:
         raise OpenVpnConfigError(f"invalid OpenVPN metadata contract: {openvpn_metadata_path}") from exc
 
 
-def openvpn_auth_file_write(data_source_path: Path, runtime_path: Path) -> OpenVpnLaunchConfig:
+def openvpn_auth_file_write(secret_root_path: Path, runtime_path: Path) -> OpenVpnLaunchConfig:
     """Write OpenVPN auth-user-pass file into pod-local runtime storage.
 
     Args:
-        data_source_path: DataSource root path.
+        secret_root_path: Read-only secret root path.
         runtime_path: Writable pod-local runtime directory.
 
     Returns:
@@ -92,8 +92,8 @@ def openvpn_auth_file_write(data_source_path: Path, runtime_path: Path) -> OpenV
         OpenVpnConfigError: If metadata or the named .ovpn file is invalid.
     """
 
-    openvpn_config_document = _openvpn_config_load(data_source_path)
-    openvpn_config_path = data_source_path / "openvpn" / openvpn_config_document.openvpn_config_name
+    openvpn_config_document = _openvpn_config_load(secret_root_path)
+    openvpn_config_path = secret_root_path / "openvpn" / openvpn_config_document.openvpn_config_name
     if not openvpn_config_path.is_file():
         raise OpenVpnConfigError(f"missing OpenVPN config file: {openvpn_config_path}")
     runtime_path.mkdir(parents=True, exist_ok=True)

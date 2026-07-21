@@ -181,7 +181,7 @@ class McpPlaywrightProfileRouter:
                 elif not (self.config.profile_root_path / route.physical_profile).exists():
                     await asyncio.to_thread(
                         playwright_profile_replace,
-                        source_profile_path=self.config.backend_config.data_source_path / "playwright_profile",
+                        source_profile_path=self.config.backend_config.secret_root_path / "playwright_profile",
                         target_profile_path=self.config.profile_root_path / route.physical_profile,
                     )
                 backend = await self._backend_get_start(physical_profile=route.physical_profile)
@@ -454,7 +454,7 @@ def _args_parse() -> argparse.Namespace:
     parser.add_argument("--backend-runtime-root-path", default=_DEFAULT_MCP_BACKEND_RUNTIME_ROOT_PATH, type=Path)
     parser.add_argument("--browser-channel", default=DEFAULT_BROWSER_CHANNEL)
     parser.add_argument("--candidate-root-path", default=_DEFAULT_CANDIDATE_ROOT_PATH, type=Path)
-    parser.add_argument("--data-source-path", required=True, type=Path)
+    parser.add_argument("--secret-root-path", required=True, type=Path)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--locale", default=DEFAULT_BROWSER_LOCALE)
     parser.add_argument("--navigation-timeout-ms", default=60000, type=int)
@@ -465,7 +465,7 @@ def _args_parse() -> argparse.Namespace:
     parser.add_argument("--timezone", default=DEFAULT_BROWSER_TIMEZONE)
     parser.add_argument("--viewport-height", default=1080, type=int)
     parser.add_argument("--viewport-width", default=1920, type=int)
-    parser.add_argument("--vpn-proxy-server", required=True)
+    parser.add_argument("--vpn-proxy-server", default="")
     return parser.parse_args()
 
 

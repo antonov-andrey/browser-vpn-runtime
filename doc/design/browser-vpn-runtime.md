@@ -2,14 +2,14 @@
 
 ## Purpose
 
-`browser-vpn-runtime` provides one reusable browser automation surface with a stable VPN egress boundary. Browser execution, profile state, and Playwright MCP belong to the browser runtime. OpenVPN connectivity, SOCKS5 target connections, tunnel lifecycle, and leak prevention belong to the VPN egress gateway. Workflow execution stays external and consumes only the browser MCP service.
+`browser-vpn-runtime` provides one reusable browser automation surface with optional VPN egress. Browser execution, profile state, and Playwright MCP belong to the browser runtime. When enabled, OpenVPN connectivity, SOCKS5 target connections, tunnel lifecycle, and leak prevention belong to the VPN egress gateway. Workflow execution stays external and consumes only the browser MCP service.
 
-## DataSource Boundaries
+## Secret Root Boundaries
 
-The DataSource layout is:
+The secret root always contains `playwright_profile/`; VPN-enabled mode additionally requires `openvpn/`:
 
 ```text
-<data-source>/
+<secret-root>/
   openvpn/
     config.json
     <name>.ovpn
@@ -19,7 +19,7 @@ The DataSource layout is:
     ...
 ```
 
-The gateway is the only component allowed to mount the whole DataSource because `openvpn/config.json` contains credentials. It validates the config name as one local `.ovpn` file inside `openvpn/`, validates the file exists, and writes `login` and `password` to a runtime-owned `0600` authentication file. It does not mutate the source configuration. The browser mounts only the materialized `playwright_profile/` subdirectory; the directory may be empty but is never represented by another source path or fallback field.
+When VPN is enabled, the gateway is the only component allowed to mount the whole secret root because `openvpn/config.json` contains credentials. It validates the config name as one local `.ovpn` file inside `openvpn/`, validates the file exists, and writes `login` and `password` to a runtime-owned `0600` authentication file. It does not mutate the source configuration. The browser mounts only the materialized `playwright_profile/` subdirectory; the directory may be empty but is never represented by another source path or fallback field. Direct-egress mode neither requires nor mounts `openvpn/`.
 
 ## Gateway Boundary
 
@@ -33,9 +33,9 @@ OpenVPN runs with `--persist-tun` and `--script-security 2`. Its initial up hook
 
 ## Browser Boundary
 
-The browser launcher requires one strict `--vpn-proxy-server hostname:port` value. It resolves that hostname immediately before launch, retains the literal IP and port for the launched process, and uses TCP readiness against exactly that endpoint. The browser never checks gateway metadata, OpenVPN state, routes, or `tun0`.
+The browser launcher accepts an optional `--vpn-proxy-server hostname:port` value. When present, it resolves that hostname immediately before launch, retains the literal IP and port for the launched process, and uses TCP readiness against exactly that endpoint. When omitted, the browser uses direct egress and emits no Playwright proxy configuration. The browser never checks gateway metadata, OpenVPN state, routes, or `tun0`.
 
-The generated `@playwright/mcp` `0.0.77` configuration sets `launchOptions.proxy.server` to `socks5://<literal-ip>:<port>` and disables QUIC. Playwright derives the Chromium host-resolver rule from that proxy, rejects local target hostname resolution, and excludes the literal proxy IP so Chromium can still reach the SOCKS endpoint. The runtime must not add a second host-resolver rule because Chromium would let it replace Playwright's proxy exclusion. This keeps target DNS within SOCKS5/Dante and blocks Chromium's UDP/QUIC direct path. The browser egress policy provides a separate network-level guarantee that the browser pod can reach only the gateway TCP service and cluster DNS.
+In VPN-enabled mode, the generated `@playwright/mcp` `0.0.77` configuration sets `launchOptions.proxy.server` to `socks5://<literal-ip>:<port>` and disables QUIC. Playwright derives the Chromium host-resolver rule from that proxy, rejects local target hostname resolution, and excludes the literal proxy IP so Chromium can still reach the SOCKS endpoint. The runtime must not add a second host-resolver rule because Chromium would let it replace Playwright's proxy exclusion. This keeps target DNS within SOCKS5/Dante and blocks Chromium's UDP/QUIC direct path. The VPN-enabled browser egress policy provides a separate network-level guarantee that the browser pod can reach only the gateway TCP service and cluster DNS. Direct-egress mode omits `launchOptions.proxy` and does not apply that VPN-only egress policy.
 
 The Playwright image has one least-privilege startup boundary. When Docker starts it as root, the container entrypoint creates and assigns only `/output/.playwright-mcp` and `/runtime`, then drops supplementary groups, group identity, and user identity before executing the requested command as `browser`. This permits brand-new bind-mounted output and runtime roots without running Chromium or MCP as root. When the platform already selects the browser UID, the same entrypoint creates accessible directories and executes directly without ownership or identity changes; this preserves the Kubernetes `runAsNonRoot` contract.
 
@@ -43,7 +43,7 @@ An OpenVPN reconnect may still interrupt a target TCP connection that was alread
 
 The public aiohttp router owns one lazy internal Playwright MCP process per active named physical profile and one unprofiled process. A named process keeps `sharedBrowserContext=true` and receives exactly `/runtime/mcp_playwright_profile/profile/<physical-profile>` as `browser.userDataDir`. The unprofiled process sets `browser.isolated=true`, omits `browser.userDataDir`, and does not create a named profile directory. Named config and output paths use `named/<physical-profile>`, while the no-profile backend uses `isolated`, so physical profile names cannot collide with the isolated namespace. Every process has a separate loopback port, config directory, stealth script, and output directory while preserving the same SOCKS, allowed-host, headed Chromium, locale, timezone, and viewport behavior.
 
-The public MCP route accepts optional `profile` and `profile_source` query parameters. Both are parsed as single structural query values and validated as safe physical names. Duplicate values, a source without a target, or equal source and target are rejected. With no explicit source, a named target is copied from the immutable `<data-source>/playwright_profile` directory only when the target directory is missing; the platform materializes that source directory even when it is empty. With an explicit source, the source must already exist as another run-local physical profile.
+The public MCP route accepts optional `profile` and `profile_source` query parameters. Both are parsed as single structural query values and validated as safe physical names. Duplicate values, a source without a target, or equal source and target are rejected. With no explicit source, a named target is copied from the immutable `<secret-root>/playwright_profile` directory only when the target directory is missing; the platform materializes that source directory even when it is empty. With an explicit source, the source must already exist as another run-local physical profile.
 
 Only a new low-level MCP action client session applies `profile_source`, identified exactly as a JSON-RPC `initialize` POST without `mcp-session-id`. Follow-up requests carrying the session header and non-initialization requests do not reset the target. An explicit reset acquires source and target locks in sorted physical-name order, stops the target backend process group, atomically replaces the target from the source, and starts the new backend generation. The reset-triggering initialize response is completely streamed and cleaned up before the sorted source and target locks are released. Ordinary non-reset streams remain outside those lifecycle locks. Operations on different target profiles retain independent locks and may proceed in parallel.
 
@@ -53,9 +53,9 @@ The router strips only `profile` and `profile_source` before forwarding the requ
 
 ## Kubernetes Reference
 
-The reference manifest contains two Deployment/Service pairs:
+The reference manifest demonstrates VPN-enabled mode with two Deployment/Service pairs:
 
-- `vpn-egress` mounts the full DataSource and `/dev/net/tun`, runs as root with only `NET_ADMIN`, and exposes TCP `1080`.
+- `vpn-egress` mounts the full secret root and `/dev/net/tun`, runs as root with only `NET_ADMIN`, and exposes TCP `1080`.
 - `browser-mcp` runs only the public profile router on TCP `8931`, mounts immutable profile input through a `playwright_profile` subPath, mounts the writeback PVC at `/runtime/mcp_playwright_profile` and the runtime-profile PVC at its `/profile` child, has no tunnel device or `NET_ADMIN`, and receives `vpn-egress:1080` as its only proxy endpoint. The shared candidate and its temporary sibling therefore reside on the same writeback filesystem and the candidate path itself is not a mountpoint.
 
 The reference requires the source PVC to contain `playwright_profile/`; an empty directory represents the first-run profile. This is a Kubernetes `subPath` prerequisite, not a browser runtime requirement for direct non-Kubernetes use.

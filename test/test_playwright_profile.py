@@ -153,14 +153,14 @@ def test_playwright_profile_replace_uses_unique_sibling_temp_directories(
 
 def test_playwright_profile_materialize_copies_directory_tree(tmp_path: Path) -> None:
     """Materialize a playwright_profile directory tree into a pod-local directory."""
-    source_profile_path = tmp_path / "data-source" / "playwright_profile"
+    source_profile_path = tmp_path / "secret-root" / "playwright_profile"
     source_profile_path.mkdir(parents=True)
     (source_profile_path / "Preferences").write_text("prefs", encoding="utf-8")
     (source_profile_path / "Default").mkdir()
     (source_profile_path / "Default" / "Cookies").write_text("cookies", encoding="utf-8")
     target_profile_path = tmp_path / "runtime-profile"
 
-    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+    playwright_profile_materialize(tmp_path / "secret-root", target_profile_path)
 
     assert sorted(path for path in target_profile_path.rglob("*") if path.is_file()) == [
         target_profile_path / "Default" / "Cookies",
@@ -170,9 +170,9 @@ def test_playwright_profile_materialize_copies_directory_tree(tmp_path: Path) ->
 
 
 def test_playwright_profile_materialize_makes_immutable_source_tree_writable(tmp_path: Path) -> None:
-    """Make a read-only DataSource snapshot writable only in its runtime copy."""
+    """Make a read-only secret root snapshot writable only in its runtime copy."""
 
-    source_profile_path = tmp_path / "data-source" / "playwright_profile"
+    source_profile_path = tmp_path / "secret-root" / "playwright_profile"
     source_default_path = source_profile_path / "Default"
     source_default_path.mkdir(parents=True)
     (source_default_path / "Preferences").write_text("{}", encoding="utf-8")
@@ -180,7 +180,7 @@ def test_playwright_profile_materialize_makes_immutable_source_tree_writable(tmp
     source_profile_path.chmod(0o555)
     target_profile_path = tmp_path / "runtime-profile"
 
-    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+    playwright_profile_materialize(tmp_path / "secret-root", target_profile_path)
 
     assert target_profile_path.stat().st_mode & stat.S_IWUSR
     assert (target_profile_path / "Default").stat().st_mode & stat.S_IWUSR
@@ -193,7 +193,7 @@ def test_playwright_profile_materialize_stages_writable_tree_before_publication(
 ) -> None:
     """Make the staged runtime tree writable before publishing its directory name."""
 
-    source_profile_path = tmp_path / "data-source" / "playwright_profile"
+    source_profile_path = tmp_path / "secret-root" / "playwright_profile"
     source_default_path = source_profile_path / "Default"
     source_default_path.mkdir(parents=True)
     source_preferences_path = source_default_path / "Preferences"
@@ -221,17 +221,17 @@ def test_playwright_profile_materialize_stages_writable_tree_before_publication(
         writable_directory_tree_atomic_replace,
     )
 
-    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+    playwright_profile_materialize(tmp_path / "secret-root", target_profile_path)
 
     assert target_profile_path.stat().st_mode & stat.S_IWUSR
     assert not source_profile_path.stat().st_mode & stat.S_IWUSR
 
 
 def test_playwright_profile_materialize_creates_empty_profile_when_source_is_absent(tmp_path: Path) -> None:
-    """Materialize an empty pod-local profile when DataSource has no playwright_profile prefix."""
+    """Materialize an empty pod-local profile when secret root has no playwright_profile prefix."""
     target_profile_path = tmp_path / "runtime-profile"
 
-    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+    playwright_profile_materialize(tmp_path / "secret-root", target_profile_path)
 
     assert target_profile_path.is_dir()
     assert not list(target_profile_path.iterdir())
@@ -239,14 +239,14 @@ def test_playwright_profile_materialize_creates_empty_profile_when_source_is_abs
 
 def test_playwright_profile_materialize_preserves_existing_runtime_profile(tmp_path: Path) -> None:
     """Keep an already materialized runtime profile unchanged within one workflow run."""
-    source_profile_path = tmp_path / "data-source" / "playwright_profile"
+    source_profile_path = tmp_path / "secret-root" / "playwright_profile"
     source_profile_path.mkdir(parents=True)
     (source_profile_path / "Preferences").write_text("source", encoding="utf-8")
     target_profile_path = tmp_path / "runtime-profile"
     target_profile_path.mkdir()
     (target_profile_path / "Preferences").write_text("runtime", encoding="utf-8")
 
-    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+    playwright_profile_materialize(tmp_path / "secret-root", target_profile_path)
 
     assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
 
@@ -259,7 +259,7 @@ def test_playwright_profile_materialize_removes_stale_chromium_singletons(tmp_pa
     for singleton_name in ["SingletonCookie", "SingletonLock", "SingletonSocket"]:
         (target_profile_path / singleton_name).symlink_to("stale")
 
-    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+    playwright_profile_materialize(tmp_path / "secret-root", target_profile_path)
 
     assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "runtime"
     assert not any(
@@ -278,7 +278,7 @@ def test_playwright_profile_materialize_removes_regular_singleton(tmp_path: Path
     singleton_path = target_profile_path / "SingletonLock"
     singleton_path.write_text("stale", encoding="utf-8")
 
-    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+    playwright_profile_materialize(tmp_path / "secret-root", target_profile_path)
 
     assert preferences_path.read_text(encoding="utf-8") == "runtime"
     assert not singleton_path.exists()
@@ -286,14 +286,14 @@ def test_playwright_profile_materialize_removes_regular_singleton(tmp_path: Path
 
 def test_playwright_profile_materialize_removes_singletons_copied_from_source(tmp_path: Path) -> None:
     """Remove stale Chromium singleton markers after fresh profile materialization."""
-    source_profile_path = tmp_path / "data-source" / "playwright_profile"
+    source_profile_path = tmp_path / "secret-root" / "playwright_profile"
     source_profile_path.mkdir(parents=True)
     (source_profile_path / "Preferences").write_text("source", encoding="utf-8")
     for singleton_name in ["SingletonCookie", "SingletonLock", "SingletonSocket"]:
         (source_profile_path / singleton_name).symlink_to("stale")
     target_profile_path = tmp_path / "runtime-profile"
 
-    playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+    playwright_profile_materialize(tmp_path / "secret-root", target_profile_path)
 
     assert (target_profile_path / "Preferences").read_text(encoding="utf-8") == "source"
     assert not any(
@@ -313,7 +313,7 @@ def test_playwright_profile_materialize_rejects_symlink_target(tmp_path: Path) -
     target_profile_path.symlink_to(external_path, target_is_directory=True)
 
     with pytest.raises(ValueError, match="profile target must be a regular directory"):
-        playwright_profile_materialize(tmp_path / "data-source", target_profile_path)
+        playwright_profile_materialize(tmp_path / "secret-root", target_profile_path)
 
     assert target_profile_path.is_symlink()
     assert external_file_path.read_text(encoding="utf-8") == "external"

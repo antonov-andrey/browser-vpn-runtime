@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 from browser_vpn_runtime.openvpn import OpenVpnLaunchConfig, openvpn_auth_file_write
 
-DEFAULT_DATA_SOURCE_PATH = Path("/input/.secret")
+DEFAULT_SECRET_ROOT_PATH = Path("/input/.secret")
 DEFAULT_HOSTS_CONFIG_PATH = Path("/etc/hosts")
 DEFAULT_RESOLV_CONFIG_PATH = Path("/etc/resolv.conf")
 DEFAULT_RUNTIME_PATH = Path("/runtime")
@@ -40,7 +40,7 @@ class VpnEgressGateway:
     def __init__(
         self,
         *,
-        data_source_path: Path,
+        secret_root_path: Path,
         hosts_config_path: Path = DEFAULT_HOSTS_CONFIG_PATH,
         resolv_config_path: Path = DEFAULT_RESOLV_CONFIG_PATH,
         runtime_path: Path,
@@ -48,13 +48,13 @@ class VpnEgressGateway:
         """Initialize the gateway artifact owner.
 
         Args:
-            data_source_path: Read-only DataSource containing OpenVPN configuration.
+            secret_root_path: Read-only secret root containing OpenVPN configuration.
             hosts_config_path: Hosts file used to pin VPN endpoints across reconnects.
             resolv_config_path: Resolver file used by OpenVPN and Dante.
             runtime_path: Writable directory for generated runtime artifacts.
         """
 
-        self._data_source_path = data_source_path
+        self._secret_root_path = secret_root_path
         self._hosts_config_path = hosts_config_path
         self._resolv_config_path = resolv_config_path
         self._runtime_path = runtime_path / "vpn-egress"
@@ -76,7 +76,7 @@ class VpnEgressGateway:
         """
 
         self._runtime_path.mkdir(parents=True, exist_ok=True)
-        openvpn_launch_config = openvpn_auth_file_write(self._data_source_path, self._runtime_path)
+        openvpn_launch_config = openvpn_auth_file_write(self._secret_root_path, self._runtime_path)
         self._openvpn_remote_host_pin(openvpn_launch_config.openvpn_config_path)
         self._resolv_config_path.write_text(VPN_RESOLV_CONFIG_TEXT, encoding="utf-8")
         dante_config_path = self._runtime_path / "sockd.conf"
@@ -305,7 +305,7 @@ def _args_parse() -> argparse.Namespace:
     """
 
     parser = argparse.ArgumentParser(description="Run the browser VPN egress gateway.")
-    parser.add_argument("--data-source-path", default=DEFAULT_DATA_SOURCE_PATH, type=Path)
+    parser.add_argument("--secret-root-path", default=DEFAULT_SECRET_ROOT_PATH, type=Path)
     parser.add_argument("--runtime-path", default=DEFAULT_RUNTIME_PATH, type=Path)
     return parser.parse_args()
 
@@ -314,7 +314,7 @@ def main() -> None:
     """Prepare gateway state, install firewall policy, and start supervisor."""
 
     args = _args_parse()
-    gateway = VpnEgressGateway(data_source_path=args.data_source_path, runtime_path=args.runtime_path)
+    gateway = VpnEgressGateway(secret_root_path=args.secret_root_path, runtime_path=args.runtime_path)
     state = gateway.runtime_prepare()
     gateway.firewall_install(state)
     command_argv = gateway.supervisor_command_argv_get(state)

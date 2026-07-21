@@ -178,18 +178,18 @@ def _playwright_profile_replace(
             shutil.rmtree(temp_profile_path)
 
 
-def playwright_profile_materialize(data_source_path: Path, target_profile_path: Path) -> None:
-    """Materialize DataSource playwright_profile into a pod-local profile directory.
+def playwright_profile_materialize(secret_root_path: Path, target_profile_path: Path) -> None:
+    """Materialize secret root playwright_profile into a pod-local profile directory.
 
     Args:
-        data_source_path: DataSource root containing playwright_profile.
+        secret_root_path: Read-only secret root containing playwright_profile.
         target_profile_path: Pod-local profile directory to create.
     """
 
     if target_profile_path.is_symlink() or (target_profile_path.exists() and not target_profile_path.is_dir()):
         raise ValueError(f"profile target must be a regular directory: {target_profile_path}")
     if not target_profile_path.exists():
-        source_profile_path = data_source_path / "playwright_profile"
+        source_profile_path = secret_root_path / "playwright_profile"
         if source_profile_path.exists() or source_profile_path.is_symlink():
             _playwright_profile_replace(
                 source_profile_path=source_profile_path,

@@ -115,13 +115,13 @@ class RouterFixture:
         self.event_list: list[str] = []
         self.hold_response_body_release = asyncio.Event()
         self.hold_response_headers_sent = asyncio.Event()
-        self.data_source_path = tmp_path / "data-source"
-        (self.data_source_path / "playwright_profile").mkdir(parents=True)
+        self.secret_root_path = tmp_path / "secret-root"
+        (self.secret_root_path / "playwright_profile").mkdir(parents=True)
         self.profile_root_path = tmp_path / "runtime" / "mcp_playwright_profile" / "profile"
         self.candidate_root_path = tmp_path / "candidate"
         backend_config = PlaywrightMcpConfig(
             allowed_host_list=["*"] if allowed_host_list is None else allowed_host_list,
-            data_source_path=self.data_source_path,
+            secret_root_path=self.secret_root_path,
             mcp_config_path=tmp_path / "runtime" / "playwright_mcp" / "base.json",
             output_dir=tmp_path / "output" / ".playwright-mcp",
             persistent_profile_path=tmp_path / "unused-profile",
@@ -292,7 +292,7 @@ def test_named_profile_without_source_materializes_immutable_default_only_once(t
     """Initialize a missing target once without overwriting later run-local state."""
 
     async def run(fixture: RouterFixture) -> None:
-        immutable_source_path = fixture.data_source_path / "playwright_profile"
+        immutable_source_path = fixture.secret_root_path / "playwright_profile"
         (immutable_source_path / "state.txt").write_text("immutable", encoding="utf-8")
 
         first_response = await fixture.client.post("/mcp?profile=target")
@@ -309,10 +309,10 @@ def test_named_profile_without_source_materializes_immutable_default_only_once(t
 
 
 def test_named_profile_without_source_rejects_missing_immutable_profile_directory(tmp_path: Path) -> None:
-    """Require the DataSource profile to exist even when its directory is empty."""
+    """Require the secret root profile to exist even when its directory is empty."""
 
     async def run(fixture: RouterFixture) -> None:
-        fixture.data_source_path.joinpath("playwright_profile").rmdir()
+        fixture.secret_root_path.joinpath("playwright_profile").rmdir()
 
         response = await fixture.client.post("/mcp?profile=target")
 
@@ -327,7 +327,7 @@ def test_router_default_candidate_path_is_one_shared_runtime_directory(tmp_path:
     """Keep the default candidate owner at the exact shared runtime path."""
 
     backend_config = PlaywrightMcpConfig(
-        data_source_path=tmp_path / "data-source",
+        secret_root_path=tmp_path / "secret-root",
         output_dir=tmp_path / ".playwright-mcp" / "base",
         vpn_proxy_server="vpn-egress:1080",
     )
@@ -350,8 +350,8 @@ def test_router_cli_maps_allowed_hosts_to_backend_template_field(
             "browser-vpn-runtime-playwright-mcp-router",
             "--allowed-hosts",
             "localhost,127.0.0.1,browser-mcp",
-            "--data-source-path",
-            str(tmp_path / "data-source"),
+            "--secret-root-path",
+            str(tmp_path / "secret-root"),
             "--vpn-proxy-server",
             "vpn-egress:1080",
         ],
@@ -362,6 +362,23 @@ def test_router_cli_maps_allowed_hosts_to_backend_template_field(
     assert namespace.allowed_host_list == ["localhost", "127.0.0.1", "browser-mcp"]
     assert namespace.vpn_proxy_server == "vpn-egress:1080"
     assert "allowed_hosts" not in vars(namespace)
+
+
+def test_router_cli_defaults_to_direct_browser_egress(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Omit the VPN proxy endpoint unless the caller explicitly enables it."""
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "browser-vpn-runtime-playwright-mcp-router",
+            "--secret-root-path",
+            str(tmp_path / "secret-root"),
+        ],
+    )
+
+    namespace = _args_parse()
+
+    assert namespace.vpn_proxy_server == ""
 
 
 def test_candidate_endpoint_stops_backend_and_atomically_replaces_candidate(
