@@ -8,8 +8,8 @@ import threading
 
 import pytest
 
-from browser_vpn_runtime import playwright_profile
-from browser_vpn_runtime.playwright_profile import (
+from browser_runtime import playwright_profile
+from browser_runtime.playwright_profile import (
     playwright_profile_materialize,
     playwright_profile_replace,
     playwright_profile_snapshot,

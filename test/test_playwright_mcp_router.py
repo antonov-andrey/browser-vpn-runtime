@@ -12,10 +12,12 @@ from aiohttp import ClientConnectionResetError, ClientSession, web
 from aiohttp.test_utils import TestClient, TestServer
 from pydantic import ValidationError
 
-from browser_vpn_runtime.playwright_mcp import PlaywrightMcpConfig
-from browser_vpn_runtime.playwright_mcp_router import (
+from browser_runtime.config import NetworkProxyConfig
+from browser_runtime.playwright_mcp import PlaywrightMcpConfig
+from browser_runtime.playwright_mcp_router import (
     _DEFAULT_CANDIDATE_ROOT_PATH,
     McpPlaywrightProfileRouter,
+    PlaywrightMcpBackendIdentity,
     PlaywrightMcpRouterConfig,
     _args_parse,
 )
@@ -111,6 +113,7 @@ class RouterFixture:
     def __init__(self, tmp_path: Path, allowed_host_list: list[str] | None = None) -> None:
         """Create isolated run-local and immutable profile roots."""
 
+        self.backend_list: list[FakePlaywrightMcpBackend] = []
         self.backend_by_profile_map: dict[str, FakePlaywrightMcpBackend] = {}
         self.event_list: list[str] = []
         self.hold_response_body_release = asyncio.Event()
@@ -125,7 +128,6 @@ class RouterFixture:
             mcp_config_path=tmp_path / "runtime" / "playwright_mcp" / "base.json",
             output_dir=tmp_path / "output" / ".playwright-mcp",
             persistent_profile_path=tmp_path / "unused-profile",
-            vpn_proxy_server="vpn-egress:1080",
         )
 
         def backend_factory(config: PlaywrightMcpConfig) -> FakePlaywrightMcpBackend:
@@ -135,6 +137,7 @@ class RouterFixture:
             backend = FakePlaywrightMcpBackend(config, self.event_list)
             backend.hold_response_body_release = self.hold_response_body_release
             backend.hold_response_headers_sent = self.hold_response_headers_sent
+            self.backend_list.append(backend)
             self.backend_by_profile_map[profile_name] = backend
             return backend
 
@@ -142,6 +145,12 @@ class RouterFixture:
             config=PlaywrightMcpRouterConfig(
                 backend_config=backend_config,
                 candidate_root_path=self.candidate_root_path,
+                network_proxy_config=NetworkProxyConfig(
+                    proxy_by_name_map={
+                        "user-a/proxy_a": "socks5://proxy-a:1080",
+                        "user-b/proxy_b": "socks5://proxy-b:1080",
+                    }
+                ),
                 profile_root_path=self.profile_root_path,
             ),
             backend_factory=backend_factory,
@@ -153,6 +162,16 @@ class RouterFixture:
         )
         application.router.add_route("*", "/{path:.*}", self.router.request_proxy)
         self.client = TestClient(TestServer(application))
+
+    def profile_path_get(self, physical_profile: str, network_proxy_name: str | None = None) -> Path:
+        """Return the exact pair-local profile path used by the router."""
+
+        return self.router._profile_path_get(
+            PlaywrightMcpBackendIdentity(
+                network_proxy_name=network_proxy_name,
+                physical_profile=physical_profile,
+            )
+        )
 
     async def close(self) -> None:
         """Close router backends and the public test server."""
@@ -179,7 +198,7 @@ def test_named_profile_is_reused_without_source_and_reset_on_each_new_source_ses
     """Reset on each explicit-source initialization, but not follow-up session requests."""
 
     async def run(fixture: RouterFixture) -> None:
-        source_path = fixture.profile_root_path / "source"
+        source_path = fixture.profile_path_get("source")
         source_path.mkdir(parents=True)
         (source_path / "state.txt").write_text("source-v1", encoding="utf-8")
 
@@ -188,18 +207,18 @@ def test_named_profile_is_reused_without_source_and_reset_on_each_new_source_ses
             json={"jsonrpc": "2.0", "method": "initialize"},
         )
         assert response.status == 200
-        assert (fixture.profile_root_path / "target" / "state.txt").read_text(encoding="utf-8") == "source-v1"
+        assert fixture.profile_path_get("target").joinpath("state.txt").read_text(encoding="utf-8") == "source-v1"
         backend = fixture.backend_by_profile_map["target"]
         assert backend.start_count == 1
 
-        (fixture.profile_root_path / "target" / "state.txt").write_text("session-state", encoding="utf-8")
+        fixture.profile_path_get("target").joinpath("state.txt").write_text("session-state", encoding="utf-8")
         response = await fixture.client.post(
             "/mcp?profile=target&profile_source=source",
             data=b"follow-up",
             headers={"mcp-session-id": "session-1"},
         )
         assert response.status == 200
-        assert (fixture.profile_root_path / "target" / "state.txt").read_text(encoding="utf-8") == "session-state"
+        assert fixture.profile_path_get("target").joinpath("state.txt").read_text(encoding="utf-8") == "session-state"
         assert backend.stop_count == 0
 
         response = await fixture.client.post(
@@ -207,7 +226,7 @@ def test_named_profile_is_reused_without_source_and_reset_on_each_new_source_ses
             json={"jsonrpc": "2.0", "method": "tools/list"},
         )
         assert response.status == 200
-        assert (fixture.profile_root_path / "target" / "state.txt").read_text(encoding="utf-8") == "session-state"
+        assert fixture.profile_path_get("target").joinpath("state.txt").read_text(encoding="utf-8") == "session-state"
         assert backend.stop_count == 0
 
         (source_path / "state.txt").write_text("source-v2", encoding="utf-8")
@@ -216,7 +235,7 @@ def test_named_profile_is_reused_without_source_and_reset_on_each_new_source_ses
             json={"jsonrpc": "2.0", "method": "initialize"},
         )
         assert response.status == 200
-        assert (fixture.profile_root_path / "target" / "state.txt").read_text(encoding="utf-8") == "source-v2"
+        assert fixture.profile_path_get("target").joinpath("state.txt").read_text(encoding="utf-8") == "source-v2"
         assert backend.stop_count == 1
         assert backend.start_count == 2
 
@@ -227,8 +246,8 @@ def test_source_reset_remains_coupled_to_its_initialize_delivery(tmp_path: Path)
     """Do not let a later same-target reset overtake the triggering initialize request."""
 
     async def run(fixture: RouterFixture) -> None:
-        first_source_path = fixture.profile_root_path / "first-source"
-        second_source_path = fixture.profile_root_path / "second-source"
+        first_source_path = fixture.profile_path_get("first-source")
+        second_source_path = fixture.profile_path_get("second-source")
         first_source_path.mkdir(parents=True)
         second_source_path.mkdir(parents=True)
         (first_source_path / "state.txt").write_text("first", encoding="utf-8")
@@ -243,7 +262,7 @@ def test_source_reset_remains_coupled_to_its_initialize_delivery(tmp_path: Path)
             )
             await asyncio.wait_for(fixture.hold_response_headers_sent.wait(), timeout=1)
             first_response = await asyncio.wait_for(first_request, timeout=1)
-            target_state_path = fixture.profile_root_path / "target" / "state.txt"
+            target_state_path = fixture.profile_path_get("target") / "state.txt"
             assert target_state_path.read_text(encoding="utf-8") == "first"
             target_backend = fixture.backend_by_profile_map["target"]
 
@@ -272,7 +291,7 @@ def test_verification_route_reuses_named_backend_without_reset(tmp_path: Path) -
     """Reuse the action backend and physical userDataDir for profile-only verification."""
 
     async def run(fixture: RouterFixture) -> None:
-        source_path = fixture.profile_root_path / "source"
+        source_path = fixture.profile_path_get("source")
         source_path.mkdir(parents=True)
         (source_path / "state.txt").write_text("source", encoding="utf-8")
         action_response = await fixture.client.post("/mcp?profile=target&profile_source=source")
@@ -296,7 +315,7 @@ def test_named_profile_without_source_materializes_immutable_default_only_once(t
         (immutable_source_path / "state.txt").write_text("immutable", encoding="utf-8")
 
         first_response = await fixture.client.post("/mcp?profile=target")
-        target_state_path = fixture.profile_root_path / "target" / "state.txt"
+        target_state_path = fixture.profile_path_get("target") / "state.txt"
         assert first_response.status == 200
         assert target_state_path.read_text(encoding="utf-8") == "immutable"
 
@@ -318,7 +337,7 @@ def test_named_profile_without_source_rejects_missing_immutable_profile_director
 
         assert response.status == 400
         assert "profile directory is missing" in await response.text()
-        assert not (fixture.profile_root_path / "target").exists()
+        assert not fixture.profile_path_get("target").exists()
 
     _router_test(run, tmp_path)
 
@@ -329,10 +348,12 @@ def test_router_default_candidate_path_is_one_shared_runtime_directory(tmp_path:
     backend_config = PlaywrightMcpConfig(
         secret_root_path=tmp_path / "secret-root",
         output_dir=tmp_path / ".playwright-mcp" / "base",
-        vpn_proxy_server="vpn-egress:1080",
     )
 
-    config = PlaywrightMcpRouterConfig(backend_config=backend_config)
+    config = PlaywrightMcpRouterConfig(
+        backend_config=backend_config,
+        network_proxy_config=NetworkProxyConfig(proxy_by_name_map={}),
+    )
 
     assert _DEFAULT_CANDIDATE_ROOT_PATH == Path("/runtime/mcp_playwright_profile/writeback_candidate")
     assert config.candidate_root_path == _DEFAULT_CANDIDATE_ROOT_PATH
@@ -344,41 +365,49 @@ def test_router_cli_maps_allowed_hosts_to_backend_template_field(
 ) -> None:
     """Parse public router hosts into the canonical backend config field."""
 
+    network_proxy_config_path = tmp_path / "network-proxy.json"
+    network_proxy_config_path.write_text('{"proxy_by_name_map": {}}\n', encoding="utf-8")
     monkeypatch.setattr(
         "sys.argv",
         [
-            "browser-vpn-runtime-playwright-mcp-router",
+            "browser-runtime-playwright-mcp-router",
             "--allowed-hosts",
             "localhost,127.0.0.1,browser-mcp",
             "--secret-root-path",
             str(tmp_path / "secret-root"),
-            "--vpn-proxy-server",
-            "vpn-egress:1080",
+            "--network-proxy-config-path",
+            str(network_proxy_config_path),
         ],
     )
 
     namespace = _args_parse()
 
     assert namespace.allowed_host_list == ["localhost", "127.0.0.1", "browser-mcp"]
-    assert namespace.vpn_proxy_server == "vpn-egress:1080"
+    assert namespace.network_proxy_config_path == network_proxy_config_path
+    assert "network_proxy_url" not in vars(namespace)
     assert "allowed_hosts" not in vars(namespace)
 
 
 def test_router_cli_defaults_to_direct_browser_egress(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Omit the VPN proxy endpoint unless the caller explicitly enables it."""
+    """Accept an empty immutable proxy map for direct browser egress."""
 
+    network_proxy_config_path = tmp_path / "network-proxy.json"
+    network_proxy_config_path.write_text('{"proxy_by_name_map": {}}\n', encoding="utf-8")
     monkeypatch.setattr(
         "sys.argv",
         [
-            "browser-vpn-runtime-playwright-mcp-router",
+            "browser-runtime-playwright-mcp-router",
             "--secret-root-path",
             str(tmp_path / "secret-root"),
+            "--network-proxy-config-path",
+            str(network_proxy_config_path),
         ],
     )
 
     namespace = _args_parse()
 
-    assert namespace.vpn_proxy_server == ""
+    assert namespace.network_proxy_config_path == network_proxy_config_path
+    assert "network_proxy_url" not in vars(namespace)
 
 
 def test_candidate_endpoint_stops_backend_and_atomically_replaces_candidate(
@@ -388,7 +417,7 @@ def test_candidate_endpoint_stops_backend_and_atomically_replaces_candidate(
     """Stop the selected backend before publishing its exact candidate snapshot."""
 
     async def run(fixture: RouterFixture) -> None:
-        from browser_vpn_runtime import playwright_mcp_router
+        from browser_runtime import playwright_mcp_router
 
         profile_snapshot = playwright_mcp_router.playwright_profile_snapshot
 
@@ -400,7 +429,7 @@ def test_candidate_endpoint_stops_backend_and_atomically_replaces_candidate(
 
         monkeypatch.setattr(playwright_mcp_router, "playwright_profile_snapshot", snapshot_record)
         await fixture.client.post("/mcp?profile=target")
-        target_path = fixture.profile_root_path / "target"
+        target_path = fixture.profile_path_get("target")
         (target_path / "state.txt").write_text("runtime", encoding="utf-8")
         candidate_path = fixture.candidate_root_path
         candidate_path.mkdir(parents=True)
@@ -430,7 +459,7 @@ def test_candidate_endpoint_logs_completion_after_snapshot(
     """Emit the structured publication event only after the snapshot completes."""
 
     async def run(fixture: RouterFixture) -> None:
-        from browser_vpn_runtime import playwright_mcp_router
+        from browser_runtime import playwright_mcp_router
 
         event_list: list[str] = []
         payload_list: list[dict[str, str]] = []
@@ -464,7 +493,7 @@ def test_candidate_endpoint_logs_completion_after_snapshot(
         assert len(payload_list) == 1
         assert (
             payload_list[0]["event_name"]
-            == "browser_vpn_runtime.playwright_mcp_router.writeback_candidate_publication_completed"
+            == "browser_runtime.playwright_mcp_router.writeback_candidate_publication_completed"
         )
         assert payload_list[0]["physical_profile"] == "target"
         assert datetime.fromisoformat(payload_list[0]["completed_at"]).utcoffset() == timezone.utc.utcoffset(None)
@@ -477,7 +506,7 @@ def test_candidate_endpoint_replaces_one_shared_candidate_with_latest_profile(tm
 
     async def run(fixture: RouterFixture) -> None:
         await fixture.client.post("/mcp?profile=first")
-        first_profile_path = fixture.profile_root_path / "first"
+        first_profile_path = fixture.profile_path_get("first")
         (first_profile_path / "first.txt").write_text("first", encoding="utf-8")
         first_response = await fixture.client.post("/runtime/mcp-playwright-profile/writeback-candidate?profile=first")
 
@@ -485,7 +514,7 @@ def test_candidate_endpoint_replaces_one_shared_candidate_with_latest_profile(tm
         assert fixture.candidate_root_path.joinpath("first.txt").read_text(encoding="utf-8") == "first"
 
         await fixture.client.post("/mcp?profile=second")
-        second_profile_path = fixture.profile_root_path / "second"
+        second_profile_path = fixture.profile_path_get("second")
         (second_profile_path / "second.txt").write_text("second", encoding="utf-8")
         second_response = await fixture.client.post(
             "/runtime/mcp-playwright-profile/writeback-candidate?profile=second"
@@ -548,7 +577,7 @@ def test_named_unprofiled_profile_does_not_collide_with_isolated_backend(tmp_pat
         isolated_config = fixture.backend_by_profile_map["isolated"].config
         assert named_config.mcp_config_path != isolated_config.mcp_config_path
         assert named_config.output_dir != isolated_config.output_dir
-        assert named_config.persistent_profile_path == fixture.profile_root_path / "unprofiled"
+        assert named_config.persistent_profile_path == fixture.profile_path_get("unprofiled")
         assert isolated_config.persistent_profile_path is None
 
     _router_test(run, tmp_path)
@@ -818,13 +847,11 @@ def test_backend_local_paths_and_ports_are_disjoint(tmp_path: Path) -> None:
         assert len({config.mcp_config_path for config in config_list}) == 3
         assert len({config.output_dir for config in config_list}) == 3
         assert len({config.port for config in config_list}) == 3
-        assert (
-            fixture.backend_by_profile_map["first"].config.persistent_profile_path
-            == fixture.profile_root_path / "first"
+        assert fixture.backend_by_profile_map["first"].config.persistent_profile_path == fixture.profile_path_get(
+            "first"
         )
-        assert (
-            fixture.backend_by_profile_map["second"].config.persistent_profile_path
-            == fixture.profile_root_path / "second"
+        assert fixture.backend_by_profile_map["second"].config.persistent_profile_path == fixture.profile_path_get(
+            "second"
         )
         assert fixture.backend_by_profile_map["isolated"].config.persistent_profile_path is None
 
@@ -837,13 +864,15 @@ def test_backend_config_generation_validates_internal_overrides(
 ) -> None:
     """Reject an invalid generated port through the canonical config constructor."""
 
-    from browser_vpn_runtime import playwright_mcp_router
+    from browser_runtime import playwright_mcp_router
 
     monkeypatch.setattr(playwright_mcp_router, "_loopback_port_get", lambda: 0)
 
     async def run(fixture: RouterFixture) -> None:
         with pytest.raises(ValidationError, match="greater than or equal to 1"):
-            fixture.router._backend_config_get("target")
+            fixture.router._backend_config_get(
+                PlaywrightMcpBackendIdentity(network_proxy_name=None, physical_profile="target")
+            )
 
     _router_test(run, tmp_path)
 
@@ -854,16 +883,108 @@ def test_backend_port_allocation_retries_router_local_collision(
 ) -> None:
     """Reserve unique ports when the OS allocator repeats an active router port."""
 
-    from browser_vpn_runtime import playwright_mcp_router
+    from browser_runtime import playwright_mcp_router
 
     port_iterator = iter([12001, 12001, 12002])
     monkeypatch.setattr(playwright_mcp_router, "_loopback_port_get", lambda: next(port_iterator))
 
     async def run(fixture: RouterFixture) -> None:
-        first_config = fixture.router._backend_config_get("first")
-        second_config = fixture.router._backend_config_get("second")
+        first_config = fixture.router._backend_config_get(
+            PlaywrightMcpBackendIdentity(network_proxy_name=None, physical_profile="first")
+        )
+        second_config = fixture.router._backend_config_get(
+            PlaywrightMcpBackendIdentity(network_proxy_name=None, physical_profile="second")
+        )
 
         assert first_config.port == 12001
         assert second_config.port == 12002
+
+    _router_test(run, tmp_path)
+
+
+def test_unknown_network_proxy_name_is_rejected_before_backend_launch(tmp_path: Path) -> None:
+    """Reject exact proxy names that are absent from the immutable platform map."""
+
+    async def run(fixture: RouterFixture) -> None:
+        response = await fixture.client.post("/mcp?network_proxy_name=user-a/unknown&profile=target")
+
+        assert response.status == 400
+        assert "network proxy is unavailable: user-a/unknown" in await response.text()
+        assert fixture.backend_list == []
+
+    _router_test(run, tmp_path)
+
+
+def test_same_profile_with_different_exact_proxies_uses_independent_backends(tmp_path: Path) -> None:
+    """Keep backend lifecycle, filesystem paths, ports, and SOCKS endpoints pair-local."""
+
+    async def run(fixture: RouterFixture) -> None:
+        first_response = await fixture.client.post("/mcp?network_proxy_name=user-a/proxy_a&profile=target&cursor=first")
+        second_response = await fixture.client.post(
+            "/mcp?network_proxy_name=user-b/proxy_b&profile=target&cursor=second"
+        )
+        first_payload = await first_response.json()
+        second_payload = await second_response.json()
+
+        assert first_payload["query"] == [["cursor", "first"]]
+        assert second_payload["query"] == [["cursor", "second"]]
+        assert len(fixture.backend_list) == 2
+        config_by_proxy_url_map = {backend.config.network_proxy_url: backend.config for backend in fixture.backend_list}
+        first_config = config_by_proxy_url_map["socks5://proxy-a:1080"]
+        second_config = config_by_proxy_url_map["socks5://proxy-b:1080"]
+        assert first_config.mcp_config_path != second_config.mcp_config_path
+        assert first_config.output_dir != second_config.output_dir
+        assert first_config.persistent_profile_path == fixture.profile_path_get("target", "user-a/proxy_a")
+        assert second_config.persistent_profile_path == fixture.profile_path_get("target", "user-b/proxy_b")
+        assert first_config.port != second_config.port
+
+    _router_test(run, tmp_path)
+
+
+def test_different_proxy_pair_is_not_blocked_by_held_same_profile_request(tmp_path: Path) -> None:
+    """Avoid serializing different proxy identities merely because the physical profile name matches."""
+
+    async def run(fixture: RouterFixture) -> None:
+        async with ClientSession() as first_client:
+            first_request = asyncio.create_task(
+                first_client.post(fixture.client.make_url("/hold?network_proxy_name=user-a/proxy_a&profile=target"))
+            )
+            await asyncio.wait_for(fixture.hold_response_headers_sent.wait(), timeout=1)
+            first_response = await asyncio.wait_for(first_request, timeout=1)
+
+            second_response = await asyncio.wait_for(
+                fixture.client.post("/mcp?network_proxy_name=user-b/proxy_b&profile=target"),
+                timeout=1,
+            )
+            assert second_response.status == 200
+
+            fixture.hold_response_body_release.set()
+            assert await first_response.read() == b'{"held": true}'
+
+    _router_test(run, tmp_path)
+
+
+def test_profile_source_reset_stays_within_selected_proxy_identity(tmp_path: Path) -> None:
+    """Copy only the source profile bound to the exact selected network proxy."""
+
+    async def run(fixture: RouterFixture) -> None:
+        selected_source_path = fixture.profile_path_get("source", "user-a/proxy_a")
+        other_source_path = fixture.profile_path_get("source", "user-b/proxy_b")
+        selected_source_path.mkdir(parents=True)
+        other_source_path.mkdir(parents=True)
+        selected_source_path.joinpath("state.txt").write_text("selected", encoding="utf-8")
+        other_source_path.joinpath("state.txt").write_text("other", encoding="utf-8")
+
+        response = await fixture.client.post(
+            "/mcp?network_proxy_name=user-a/proxy_a&profile=target&profile_source=source",
+            json={"jsonrpc": "2.0", "method": "initialize"},
+        )
+
+        assert response.status == 200
+        assert (
+            fixture.profile_path_get("target", "user-a/proxy_a").joinpath("state.txt").read_text(encoding="utf-8")
+            == "selected"
+        )
+        assert not fixture.profile_path_get("target", "user-b/proxy_b").exists()
 
     _router_test(run, tmp_path)

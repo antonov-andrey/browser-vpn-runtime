@@ -14,9 +14,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./
-COPY browser_vpn_runtime ./browser_vpn_runtime
+COPY browser_runtime ./browser_runtime
+COPY --from=workflow_container_contract README.md pyproject.toml /tmp/workflow-container-contract/
+COPY --from=workflow_container_contract workflow_container_contract /tmp/workflow-container-contract/workflow_container_contract
 
-RUN python -m pip install --root-user-action=ignore --no-cache-dir ".[browser]" \
+RUN python -m pip install --root-user-action=ignore --no-cache-dir /tmp/workflow-container-contract ".[browser]" \
+    && rm -rf /tmp/workflow-container-contract \
     && groupadd --gid 1000 browser \
     && useradd --uid 1000 --gid browser --create-home --shell /usr/sbin/nologin browser \
     && mkdir -p /output /runtime \
@@ -24,4 +27,4 @@ RUN python -m pip install --root-user-action=ignore --no-cache-dir ".[browser]" 
 
 USER root
 
-ENTRYPOINT ["/usr/bin/tini", "--", "browser-vpn-runtime-container-entrypoint"]
+ENTRYPOINT ["/usr/bin/tini", "--", "browser-runtime-container-entrypoint"]

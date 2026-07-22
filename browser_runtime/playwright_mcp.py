@@ -1,25 +1,26 @@
-"""Playwright MCP server launcher for browser/VPN runtime."""
+"""Playwright MCP server launcher for browser runtime."""
 
 import asyncio
 import ipaddress
 import json
 import os
-import re
 import shutil
 import signal
 import socket
 import time
 from pathlib import Path
 from typing import Self
+from urllib.parse import urlsplit
 
 from playwright_stealth import Stealth
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from browser_vpn_runtime.config import (
+from browser_runtime.config import (
     DEFAULT_BROWSER_TIMEZONE,
     BrowserLocaleConfig,
+    network_proxy_url_validate,
 )
-from browser_vpn_runtime.playwright_profile import playwright_profile_materialize
+from browser_runtime.playwright_profile import playwright_profile_materialize
 
 DEFAULT_ACTION_TIMEOUT_MS = 30000
 DEFAULT_ALLOWED_HOST_LIST = ["localhost", "127.0.0.1"]
@@ -30,7 +31,7 @@ DEFAULT_MCP_EXECUTABLE_NAME = "playwright-mcp"
 DEFAULT_MCP_HOST = "127.0.0.1"
 DEFAULT_OUTPUT_DIR = Path("/runtime/.playwright-mcp/current")
 DEFAULT_PORT = 8931
-DEFAULT_PROXY_READY_TIMEOUT_SECONDS = 60
+DEFAULT_READINESS_TIMEOUT_SECONDS = 60
 XVFB_RUN_EXECUTABLE_NAME = "xvfb-run"
 
 
@@ -58,8 +59,8 @@ class PlaywrightMcpConfig(BaseModel):
     timezone: str = DEFAULT_BROWSER_TIMEZONE
     viewport_height: int = Field(default=1080, ge=1)
     viewport_width: int = Field(default=1920, ge=1)
-    proxy_ready_timeout_seconds: int = Field(default=DEFAULT_PROXY_READY_TIMEOUT_SECONDS, ge=0)
-    vpn_proxy_server: str = ""
+    readiness_timeout_seconds: int = Field(default=DEFAULT_READINESS_TIMEOUT_SECONDS, ge=0)
+    network_proxy_url: str | None = None
 
     @model_validator(mode="after")
     def _playwright_mcp_launch_contract_validate(self) -> Self:
@@ -78,8 +79,8 @@ class PlaywrightMcpConfig(BaseModel):
             raise ValueError("isolated backend must omit persistent_profile_path")
         if not self.isolated and self.persistent_profile_path is None:
             raise ValueError("named backend requires persistent_profile_path")
-        if self.vpn_proxy_server:
-            _vpn_proxy_endpoint_get(self.vpn_proxy_server)
+        if self.network_proxy_url is not None:
+            _network_proxy_endpoint_get(self.network_proxy_url)
         return self
 
 
@@ -130,7 +131,7 @@ def _mcp_config_payload_get(
     config: PlaywrightMcpConfig,
     persistent_profile_path: Path | None,
     stealth_script_path: Path,
-    vpn_proxy_server: str,
+    network_proxy_url: str | None,
 ) -> dict[str, object]:
     """Return Playwright MCP JSON config payload.
 
@@ -138,7 +139,7 @@ def _mcp_config_payload_get(
         config: Validated launcher config.
         persistent_profile_path: Pod-local persistent profile path, or `None` for isolated sessions.
         stealth_script_path: JavaScript init script path generated from stealth.
-        vpn_proxy_server: Literal resolved SOCKS5 proxy server endpoint, or an empty string for direct egress.
+        network_proxy_url: Literal resolved SOCKS5 URL, or `None` for direct egress.
 
     Returns:
         JSON-serializable Playwright MCP config payload.
@@ -154,10 +155,10 @@ def _mcp_config_payload_get(
         "chromiumSandbox": False,
         "headless": False,
     }
-    if vpn_proxy_server:
+    if network_proxy_url is not None:
         launch_option_json["proxy"] = {
             "bypass": "<-loopback>",
-            "server": f"socks5://{vpn_proxy_server}",
+            "server": network_proxy_url,
         }
     browser_payload: dict[str, object] = {
         "browserName": "chromium",
@@ -255,11 +256,11 @@ def _stealth_script_write(*, locale_config: BrowserLocaleConfig, stealth_script_
     stealth_script_path.write_text(stealth.script_payload, encoding="utf-8")
 
 
-def _vpn_proxy_endpoint_get(vpn_proxy_server: str) -> tuple[str, int]:
-    """Parse one strict SOCKS5 gateway hostname and port endpoint.
+def _network_proxy_endpoint_get(network_proxy_url: str) -> tuple[str, int]:
+    """Parse one strict SOCKS5 URL into its hostname and port.
 
     Args:
-        vpn_proxy_server: Gateway endpoint in `hostname:port` form.
+        network_proxy_url: Exact credential-free SOCKS5 URL.
 
     Returns:
         Hostname and port for the gateway endpoint.
@@ -268,33 +269,20 @@ def _vpn_proxy_endpoint_get(vpn_proxy_server: str) -> tuple[str, int]:
         ValueError: If the endpoint is not one hostname and TCP port.
     """
 
-    hostname, separator, port_text = vpn_proxy_server.rpartition(":")
-    if (
-        not separator
-        or not hostname
-        or len(hostname) > 253
-        or "/" in hostname
-        or any(character.isspace() for character in hostname)
-        or "://" in hostname
-        or re.fullmatch(
-            r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?",
-            hostname,
-        )
-        is None
-        or not port_text.isdecimal()
-    ):
-        raise ValueError("vpn_proxy_server must be one hostname:port endpoint")
-    port = int(port_text)
-    if not 1 <= port <= 65535:
-        raise ValueError("vpn_proxy_server port must be between 1 and 65535")
+    network_proxy_url_validate(network_proxy_url)
+    split_network_proxy_url = urlsplit(network_proxy_url)
+    hostname = split_network_proxy_url.hostname
+    port = split_network_proxy_url.port
+    if hostname is None or port is None:
+        raise ValueError("network proxy URL must contain a hostname and port")
     return hostname, port
 
 
-def _vpn_proxy_server_resolve(vpn_proxy_server: str) -> tuple[str, int]:
+def _network_proxy_url_resolve(network_proxy_url: str) -> tuple[str, int]:
     """Resolve the gateway hostname once into a literal IP endpoint.
 
     Args:
-        vpn_proxy_server: Gateway endpoint in `hostname:port` form.
+        network_proxy_url: Exact credential-free SOCKS5 URL.
 
     Returns:
         Literal IP address and original port.
@@ -303,11 +291,11 @@ def _vpn_proxy_server_resolve(vpn_proxy_server: str) -> tuple[str, int]:
         PlaywrightMcpError: If hostname resolution returns no literal IP address.
     """
 
-    hostname, port = _vpn_proxy_endpoint_get(vpn_proxy_server)
+    hostname, port = _network_proxy_endpoint_get(network_proxy_url)
     try:
         address_info_list = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
     except OSError as exc:
-        raise PlaywrightMcpError(f"vpn_proxy: cannot resolve {vpn_proxy_server}") from exc
+        raise PlaywrightMcpError(f"network_proxy: cannot resolve {network_proxy_url}") from exc
     for address_info in address_info_list:
         address = address_info[4][0]
         try:
@@ -315,26 +303,26 @@ def _vpn_proxy_server_resolve(vpn_proxy_server: str) -> tuple[str, int]:
         except ValueError:
             continue
         return literal_ip.compressed, port
-    raise PlaywrightMcpError(f"vpn_proxy: resolution returned no IP address for {vpn_proxy_server}")
+    raise PlaywrightMcpError(f"network_proxy: resolution returned no IP address for {network_proxy_url}")
 
 
-def _vpn_proxy_server_literal_get(*, proxy_ip: str, proxy_port: int) -> str:
-    """Return the SOCKS5 server endpoint formatted from a literal IP address.
+def _network_proxy_url_literal_get(*, proxy_ip: str, proxy_port: int) -> str:
+    """Return the SOCKS5 URL formatted from a literal IP address.
 
     Args:
         proxy_ip: Literal IPv4 or IPv6 proxy address.
         proxy_port: SOCKS5 TCP port.
 
     Returns:
-        Literal endpoint suitable for Playwright proxy configuration.
+        Literal URL suitable for Playwright proxy configuration.
     """
 
     if ipaddress.ip_address(proxy_ip).version == 6:
-        return f"[{proxy_ip}]:{proxy_port}"
-    return f"{proxy_ip}:{proxy_port}"
+        return f"socks5://[{proxy_ip}]:{proxy_port}"
+    return f"socks5://{proxy_ip}:{proxy_port}"
 
 
-def _vpn_proxy_wait(*, config: PlaywrightMcpConfig, proxy_ip: str, proxy_port: int) -> None:
+def _network_proxy_wait(*, config: PlaywrightMcpConfig, proxy_ip: str, proxy_port: int) -> None:
     """Wait for the resolved SOCKS5 gateway endpoint to accept TCP connections.
 
     Args:
@@ -346,14 +334,14 @@ def _vpn_proxy_wait(*, config: PlaywrightMcpConfig, proxy_ip: str, proxy_port: i
         PlaywrightMcpError: If the gateway does not become reachable before timeout.
     """
 
-    deadline = time.monotonic() + config.proxy_ready_timeout_seconds
+    deadline = time.monotonic() + config.readiness_timeout_seconds
     while True:
         try:
             with socket.create_connection((proxy_ip, proxy_port), timeout=1):
                 return
         except OSError as exc:
             if time.monotonic() >= deadline:
-                raise PlaywrightMcpError(f"vpn_proxy: unavailable at {proxy_ip}:{proxy_port}") from exc
+                raise PlaywrightMcpError(f"network_proxy: unavailable at {proxy_ip}:{proxy_port}") from exc
             time.sleep(1)
 
 
@@ -392,7 +380,7 @@ def playwright_mcp_command_argv_get(config: PlaywrightMcpConfig) -> list[str]:
         Command argv for the Playwright MCP process.
 
     Raises:
-        PlaywrightMcpError: If the configured VPN proxy cannot be resolved or reached.
+        PlaywrightMcpError: If the configured network proxy cannot be resolved or reached.
     """
 
     persistent_profile_path: Path | None = None
@@ -404,11 +392,11 @@ def playwright_mcp_command_argv_get(config: PlaywrightMcpConfig) -> list[str]:
             target_profile_path=config.persistent_profile_path,
         )
         persistent_profile_path = config.persistent_profile_path
-    vpn_proxy_server = ""
-    if config.vpn_proxy_server:
-        vpn_proxy_ip, vpn_proxy_port = _vpn_proxy_server_resolve(config.vpn_proxy_server)
-        vpn_proxy_server = _vpn_proxy_server_literal_get(proxy_ip=vpn_proxy_ip, proxy_port=vpn_proxy_port)
-        _vpn_proxy_wait(config=config, proxy_ip=vpn_proxy_ip, proxy_port=vpn_proxy_port)
+    network_proxy_url = None
+    if config.network_proxy_url is not None:
+        network_proxy_ip, network_proxy_port = _network_proxy_url_resolve(config.network_proxy_url)
+        network_proxy_url = _network_proxy_url_literal_get(proxy_ip=network_proxy_ip, proxy_port=network_proxy_port)
+        _network_proxy_wait(config=config, proxy_ip=network_proxy_ip, proxy_port=network_proxy_port)
     config.output_dir.mkdir(parents=True, exist_ok=True)
     if persistent_profile_path is not None:
         _profile_language_preference_sync(
@@ -422,7 +410,7 @@ def playwright_mcp_command_argv_get(config: PlaywrightMcpConfig) -> list[str]:
             config=config,
             persistent_profile_path=persistent_profile_path,
             stealth_script_path=stealth_script_path,
-            vpn_proxy_server=vpn_proxy_server,
+            network_proxy_url=network_proxy_url,
         ),
         config_path=config.mcp_config_path,
     )
@@ -529,7 +517,7 @@ class PlaywrightMcpBackend:
 
         if self._process is None:
             raise PlaywrightMcpError("Playwright MCP backend process was not started")
-        deadline = asyncio.get_running_loop().time() + self.config.proxy_ready_timeout_seconds
+        deadline = asyncio.get_running_loop().time() + self.config.readiness_timeout_seconds
         while True:
             if self._process.returncode is not None:
                 raise PlaywrightMcpError(

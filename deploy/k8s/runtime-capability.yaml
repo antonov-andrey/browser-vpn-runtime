@@ -1,7 +1,22 @@
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: browser-runtime-network-proxy
+data:
+  network-proxy.json: |
+    {"proxy_by_name_map": {}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: browser-runtime-profile-source
+data:
+  .keep: ""
+---
+apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: browser-vpn-runtime-artifact-output
+  name: browser-runtime-artifact-output
 spec:
   accessModes:
     - ReadWriteMany
@@ -12,7 +27,7 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: browser-vpn-runtime-profile-runtime
+  name: browser-runtime-profile-runtime
 spec:
   accessModes:
     - ReadWriteOnce
@@ -23,93 +38,13 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: browser-vpn-runtime-profile-writeback
+  name: browser-runtime-profile-writeback
 spec:
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
       storage: 1Gi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: vpn-egress
-  labels:
-    app.kubernetes.io/name: vpn-egress
-spec:
-  replicas: 1
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: vpn-egress
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: vpn-egress
-    spec:
-      restartPolicy: Always
-      volumes:
-        - name: runtime-secret-root
-          persistentVolumeClaim:
-            claimName: browser-vpn-runtime-secret-root
-            readOnly: true
-        - name: runtime-work
-          emptyDir: {}
-        - name: tun-device
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
-      containers:
-        - name: vpn-egress
-          image: browser-vpn-runtime-openvpn:latest
-          command:
-            - browser-vpn-runtime-vpn-egress
-          securityContext:
-            capabilities:
-              add:
-                - NET_ADMIN
-            runAsUser: 0
-          ports:
-            - name: socks5
-              containerPort: 1080
-              protocol: TCP
-          readinessProbe:
-            exec:
-              command:
-                - browser-vpn-runtime-vpn-egress-healthcheck
-                - --target-host
-                - one.one.one.one
-                - --target-port
-                - "443"
-                - --timeout-seconds
-                - "3"
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
-          volumeMounts:
-            - name: runtime-secret-root
-              mountPath: /input/.secret
-              readOnly: true
-            - name: runtime-work
-              mountPath: /runtime
-            - name: tun-device
-              mountPath: /dev/net/tun
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: vpn-egress
-spec:
-  selector:
-    app.kubernetes.io/name: vpn-egress
-  ports:
-    - name: socks5
-      port: 1080
-      protocol: TCP
-      targetPort: socks5
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -129,30 +64,33 @@ spec:
       labels:
         app.kubernetes.io/name: browser-mcp
     spec:
+      automountServiceAccountToken: false
       restartPolicy: Always
       securityContext:
         fsGroup: 1000
       volumes:
         - name: artifact-output
           persistentVolumeClaim:
-            claimName: browser-vpn-runtime-artifact-output
+            claimName: browser-runtime-artifact-output
+        - name: network-proxy-config
+          configMap:
+            name: browser-runtime-network-proxy
         - name: profile-runtime
           persistentVolumeClaim:
-            claimName: browser-vpn-runtime-profile-runtime
+            claimName: browser-runtime-profile-runtime
+        - name: profile-source
+          configMap:
+            name: browser-runtime-profile-source
         - name: profile-writeback
           persistentVolumeClaim:
-            claimName: browser-vpn-runtime-profile-writeback
-        - name: runtime-secret-root
-          persistentVolumeClaim:
-            claimName: browser-vpn-runtime-secret-root
-            readOnly: true
+            claimName: browser-runtime-profile-writeback
         - name: runtime-work
           emptyDir: {}
       containers:
         - name: browser-mcp
-          image: browser-vpn-runtime-playwright:latest
+          image: browser-runtime-playwright:latest
           args:
-            - browser-vpn-runtime-playwright-mcp-router
+            - browser-runtime-playwright-mcp-router
             - --secret-root-path
             - /input/.secret
             - --profile-root-path
@@ -163,14 +101,14 @@ spec:
             - /output/.playwright-mcp
             - --backend-runtime-root-path
             - /runtime/playwright_mcp_backend
+            - --network-proxy-config-path
+            - /runtime-config/network-proxy.json
             - --host
             - 0.0.0.0
             - --allowed-hosts
             - localhost,127.0.0.1,browser-mcp
             - --port
             - "8931"
-            - --vpn-proxy-server
-            - vpn-egress:1080
           env:
             - name: TZ
               value: UTC
@@ -179,6 +117,7 @@ spec:
             capabilities:
               drop:
                 - ALL
+            readOnlyRootFilesystem: true
             runAsGroup: 1000
             runAsNonRoot: true
             runAsUser: 1000
@@ -196,16 +135,18 @@ spec:
           volumeMounts:
             - name: artifact-output
               mountPath: /output
+            - name: network-proxy-config
+              mountPath: /runtime-config
+              readOnly: true
             - name: profile-runtime
               mountPath: /runtime/mcp_playwright_profile/profile
-            - name: profile-writeback
-              mountPath: /runtime/mcp_playwright_profile
-            - name: runtime-secret-root
+            - name: profile-source
               mountPath: /input/.secret/playwright_profile
               readOnly: true
-              subPath: playwright_profile
+            - name: profile-writeback
+              mountPath: /runtime/mcp_playwright_profile/writeback_candidate
             - name: runtime-work
-              mountPath: /runtime
+              mountPath: /runtime/playwright_mcp_backend
 ---
 apiVersion: v1
 kind: Service
@@ -219,34 +160,3 @@ spec:
       port: 8931
       protocol: TCP
       targetPort: mcp
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: browser-mcp-egress-deny
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: browser-mcp
-  policyTypes:
-    - Egress
-  egress:
-    - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: vpn-egress
-      ports:
-        - port: 1080
-          protocol: TCP
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels:
-              k8s-app: kube-dns
-      ports:
-        - port: 53
-          protocol: TCP
-        - port: 53
-          protocol: UDP

@@ -1,4 +1,4 @@
-"""Least-privilege process boundary for the Playwright container image."""
+"""Least-privilege process boundary for the browser container image."""
 
 import os
 import pwd

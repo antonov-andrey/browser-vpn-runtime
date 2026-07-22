@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from browser_vpn_runtime.container_entrypoint import container_command_exec
+from browser_runtime.container_entrypoint import container_command_exec
 
 
 class CommandExecIntercepted(RuntimeError):
@@ -56,7 +56,7 @@ def test_container_entrypoint_prepares_owned_roots_before_privilege_drop(
 
     with pytest.raises(CommandExecIntercepted):
         container_command_exec(
-            command_argv=["browser-vpn-runtime-playwright-mcp-router", "--port", "8931"],
+            command_argv=["browser-runtime-playwright-mcp-router", "--port", "8931"],
             runtime_user_name="browser",
             writable_path_list=writable_path_list,
         )
@@ -69,8 +69,8 @@ def test_container_entrypoint_prepares_owned_roots_before_privilege_drop(
         (
             "execvp",
             (
-                "browser-vpn-runtime-playwright-mcp-router",
-                ["browser-vpn-runtime-playwright-mcp-router", "--port", "8931"],
+                "browser-runtime-playwright-mcp-router",
+                ["browser-runtime-playwright-mcp-router", "--port", "8931"],
             ),
         ),
     ]
@@ -111,15 +111,15 @@ def test_container_entrypoint_preserves_platform_supplied_browser_identity(
             CommandExecIntercepted: Always, after validating the command.
         """
 
-        assert executable == "browser-vpn-runtime-playwright-mcp-router"
-        assert command_argv == ["browser-vpn-runtime-playwright-mcp-router"]
+        assert executable == "browser-runtime-playwright-mcp-router"
+        assert command_argv == ["browser-runtime-playwright-mcp-router"]
         raise CommandExecIntercepted
 
     monkeypatch.setattr(os, "execvp", command_exec)
 
     with pytest.raises(CommandExecIntercepted):
         container_command_exec(
-            command_argv=["browser-vpn-runtime-playwright-mcp-router"],
+            command_argv=["browser-runtime-playwright-mcp-router"],
             runtime_user_name="browser",
             writable_path_list=[writable_path],
         )
@@ -145,7 +145,7 @@ def test_container_entrypoint_rejects_unexpected_platform_identity(
 
     with pytest.raises(PermissionError, match="expected root or browser uid 1000"):
         container_command_exec(
-            command_argv=["browser-vpn-runtime-playwright-mcp-router"],
+            command_argv=["browser-runtime-playwright-mcp-router"],
             runtime_user_name="browser",
             writable_path_list=[tmp_path / ".playwright-mcp"],
         )
